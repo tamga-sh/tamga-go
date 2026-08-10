@@ -1,0 +1,18 @@
+{
+  "note": "TEST-ONLY keys, not for production use. Public keys backing the testdata/machine_file_*.machine fixtures, generated deterministically/once for this repo's own test suite.",
+  "ed25519": {
+    "public_key_base64_raw32": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ="
+  },
+  "rsa_pkcs1": {
+    "public_key_base64_spki_der": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAywk4+sZJUE24uPVsQIkTsaCxWU0vqIaqNBfAmcatjXlL0oyQ+jQT6S9pYSnLE1gVY1L92xZTfLGB+5bPu+QdutDUYww5DAejqFsUF5iMVIXwpNrYL34cSvLHp4nsgzTSQQIsNog/GcVmsaW3n3GQeZtgnfGSHXm/4Sizsc828zQrVv89iBTRWX/j8Is1lnJHi0NhtdIV8T6UYZVHlezIMBKXjsjZgzEj9bYTIVb10GYdODk7/9ow31L8d1RnwfYir9+7XoLGyZ8yfL/71gOT3CqXKhpvLA2Dye7PxGJZX4PfyCpMcVBF4mjmzQB+dZRMnlFPyLp9ETxs/MawKsQA5QIDAQAB"
+  },
+  "rsa_pss": {
+    "public_key_base64_spki_der": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA+M0k1HEvVZCfJWiFwi+WjHeYxX3T9BGV+gS8ZdIpZNnTfkY9O0q1wNwk6+cxerYOHoKJapFUY2BzeCxdNZgT35+M3E2TAUimVWJE/tAEYNPrw4lQU/76cu1YwpK5q52YYGn25zusniUoBuxd4Z5xU+CmpAjv721yd4vWvsMFpz0S1M4ez9Nfb2mimu7Fp52w/Biv7eTNxxbv62jfTMdweSDQ/iHBgGuOrV4ztipOMlt66mF/29rpnnRx4/77JULkHnf/C6p5ase/t2hCRdO7rYPSvP+O79mlhUz4n2jRe0x5+Nufj5I8gUtgyWMhjmabvDJtJoxsisiX431pYFtTQwIDAQAB"
+  },
+  "ecdsa_p256": {
+    "public_key_base64_uncompressed_point65": "BGS19Vfq9Aepm2cxgoTWrYs65smCb+rN+Dl4mG0hFDtoG13N5Izzt655V18OeXGlQ8xHi3M1BVRBzSfBiI1g+Js=",
+    "note": "This fixture is the encrypted (aes-256-gcm) variant, to also cover that decode path from a committed testdata fixture rather than only from an in-test-generated one.",
+    "license_key": "lic-abc123",
+    "fingerprint": "fp-abc123"
+  }
+}

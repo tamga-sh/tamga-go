@@ -1,13 +1,21 @@
-// ecdsa.go will hold a thin wrapper over stdlib crypto/ecdsa, P-256 curve:
+// Package crypto — ecdsa.go wraps stdlib crypto/ecdsa for the
+// ECDSA_P256_SIGN machine checkout signature scheme.
 //
-//	Verify(pub *ecdsa.PublicKey, hashed, sig []byte) bool
-//
-// Used by checkout_machine.go when LicenseScheme is ECDSA_P256_SIGN. The
-// exact signature encoding on the wire (ASN.1 DER vs raw r‖s) must be
-// documented and tested explicitly once implemented — ECDSA verifiers are
-// a common source of wire-format mismatches between languages.
-//
-// Not implemented yet — scaffold placeholder. See
-// docs/plans/tamga-go.plan.md Section F; tests will verify against known
-// P-256 test vectors (internal/crypto/ecdsa_test.go).
+// Wire signature encoding is ASN.1 DER (matching the server's aws-lc-rs
+// ECDSA_P256_SHA256_ASN1 verifier), not the raw r‖s concatenation some
+// other ECDSA wire formats use — VerifyECDSA uses stdlib's
+// ecdsa.VerifyASN1 specifically, not a raw-r‖s parser, to match.
 package crypto
+
+import (
+	"crypto/ecdsa"
+	"crypto/sha256"
+)
+
+// VerifyECDSA verifies an ECDSA P-256/SHA-256 signature (ASN.1 DER
+// encoded, per this file's doc comment) over message (hashed internally —
+// callers pass the raw signed bytes, not a pre-computed digest).
+func VerifyECDSA(pub *ecdsa.PublicKey, message, sig []byte) bool {
+	digest := sha256.Sum256(message)
+	return ecdsa.VerifyASN1(pub, digest[:], sig)
+}
