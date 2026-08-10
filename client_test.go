@@ -3,6 +3,7 @@ package tamga
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -268,5 +269,127 @@ func TestAccountIDPathSegment_AlwaysPresent(t *testing.T) {
 				t.Errorf("path = %q, want prefix %q", gotPath, wantPrefix)
 			}
 		})
+	}
+}
+
+// TestSubResourceIDsAreEscapedInRequestPaths is the regression guard for
+// a real HIGH-severity finding from code review: a licenseID/machineID/
+// entitlementID/processID containing URL-meaningful characters
+// ('/', '?', '#') must not be able to redirect the request to a different
+// path or inject extra query parameters. Every ID this package embeds in
+// a request path must go through escapePathSegment (client.go), the same
+// treatment accountID already gets via url.PathEscape in buildURL.
+func TestSubResourceIDsAreEscapedInRequestPaths(t *testing.T) {
+	const maliciousID = "abc?injected=1&other=2"
+
+	var gotPath, gotRawQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotRawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ts":"2026-01-01T00:00:00Z","valid":true,"detail":"ok","code":"VALID"}`))
+	}))
+	defer server.Close()
+
+	c, err := New("acct-123", WithBaseURL(server.URL), WithLicenseKey("lic-abc"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := c.QuickValidate(context.Background(), maliciousID); err != nil {
+		t.Fatalf("QuickValidate() error = %v", err)
+	}
+
+	// The '?' and '&' must have been percent-encoded into the path
+	// segment itself, never split out into an actual query string that
+	// could inject unintended parameters.
+	if gotRawQuery != "" {
+		t.Fatalf("request query = %q, want empty — the malicious ID's '?'/'&' must be percent-encoded into the path, not parsed as a real query string", gotRawQuery)
+	}
+	wantPathSuffix := "/actions/validate"
+	if !strings.HasSuffix(gotPath, wantPathSuffix) {
+		t.Fatalf("path = %q, want it to end with %q (the ID must not have redirected the request elsewhere)", gotPath, wantPathSuffix)
+	}
+	if !strings.Contains(gotPath, "abc") {
+		t.Fatalf("path = %q, want it to still contain the escaped ID", gotPath)
+	}
+}
+
+// TestMapError_FallbackOnNonJSONBody covers mapError's fallback branch for
+// a non-2xx response whose body isn't valid JSON at all (e.g. an HTML
+// error page from a proxy in front of the API) — must produce a synthetic
+// "UNKNOWN" error, not panic or silently swallow the failure.
+func TestMapError_FallbackOnNonJSONBody(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html><body>502 Bad Gateway</body></html>"))
+	})
+	defer closeFn()
+
+	_, err := c.CheckIn(context.Background(), "lic-id")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.Err.Code != "UNKNOWN" {
+		t.Errorf("Code = %q, want UNKNOWN", apiErr.Err.Code)
+	}
+	if apiErr.HTTPStatus != http.StatusBadGateway {
+		t.Errorf("HTTPStatus = %d, want %d", apiErr.HTTPStatus, http.StatusBadGateway)
+	}
+}
+
+// TestMapError_FallbackOnEmptyErrorsArray covers mapError's fallback
+// branch for a non-2xx response that IS valid JSON:API shape but whose
+// "errors" array is empty — same synthetic "UNKNOWN" fallback as a
+// non-JSON body, since there's no per-error detail to surface.
+func TestMapError_FallbackOnEmptyErrorsArray(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"errors":[]}`))
+	})
+	defer closeFn()
+
+	_, err := c.CheckIn(context.Background(), "lic-id")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.Err.Code != "UNKNOWN" {
+		t.Errorf("Code = %q, want UNKNOWN", apiErr.Err.Code)
+	}
+}
+
+// failingReadCloser is an io.ReadCloser whose Read always errors — used to
+// exercise mapError's readErr != nil branch, which a well-behaved
+// httptest server can't trigger on its own (a real HTTP body read only
+// fails on genuine transport-level problems, like a connection dropped
+// mid-body).
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+func (failingReadCloser) Close() error             { return nil }
+
+func TestMapError_FallbackOnBodyReadError(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Header:     http.Header{},
+		Body:       failingReadCloser{},
+	}
+	err := mapError(resp)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.Err.Code != "UNKNOWN" {
+		t.Errorf("Code = %q, want UNKNOWN", apiErr.Err.Code)
+	}
+	if !strings.Contains(apiErr.Err.Detail, "could not be read") {
+		t.Errorf("Detail = %q, want it to mention the read failure", apiErr.Err.Detail)
 	}
 }

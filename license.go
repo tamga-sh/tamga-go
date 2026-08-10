@@ -110,7 +110,7 @@ func (c *Client) ValidateByID(ctx context.Context, licenseID string, opts *Valid
 		}
 	}
 	body := map[string]any{"meta": meta}
-	path := fmt.Sprintf("/licenses/%s/actions/validate", licenseID)
+	path := fmt.Sprintf("/licenses/%s/actions/validate", escapePathSegment(licenseID))
 	license, validationMeta, err := decodeJSONAPIWithMeta[License, ValidationMeta](ctx, c, "POST", path, body)
 	if err != nil {
 		return nil, nil, err
@@ -126,7 +126,7 @@ func (c *Client) ValidateByID(ctx context.Context, licenseID string, opts *Valid
 // application/json with a flat {ts, valid, detail, code} body — no "data"
 // envelope (docs/sdk.md §1/§2) — decodeFlat implements that special case.
 func (c *Client) QuickValidate(ctx context.Context, licenseID string) (*ValidationMeta, error) {
-	path := fmt.Sprintf("/licenses/%s/actions/validate", licenseID)
+	path := fmt.Sprintf("/licenses/%s/actions/validate", escapePathSegment(licenseID))
 	meta, err := decodeFlat[ValidationMeta](ctx, c, "GET", path)
 	if err != nil {
 		return nil, err
@@ -144,7 +144,7 @@ func (c *Client) QuickValidate(ctx context.Context, licenseID string) (*Validati
 // that flag on the license's policy before scheduling periodic check-ins,
 // rather than reacting to this error with retry logic.
 func (c *Client) CheckIn(ctx context.Context, licenseID string) (*License, error) {
-	path := fmt.Sprintf("/licenses/%s/actions/check-in", licenseID)
+	path := fmt.Sprintf("/licenses/%s/actions/check-in", escapePathSegment(licenseID))
 	license, err := decodeJSONAPI[License](ctx, c, "POST", path, nil)
 	if err != nil {
 		return nil, err

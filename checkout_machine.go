@@ -85,7 +85,7 @@ func (c *Client) CheckOutMachine(ctx context.Context, machineID string, opts Che
 			return nil, err
 		}
 	}
-	path := fmt.Sprintf("/machines/%s/actions/check-out", machineID)
+	path := fmt.Sprintf("/machines/%s/actions/check-out", escapePathSegment(machineID))
 	if opts.UsePOST {
 		return c.checkOutMachinePOST(ctx, path, opts)
 	}

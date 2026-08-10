@@ -78,6 +78,17 @@ func (e *APIError) As(target any) bool {
 // Sentinel errors, fixed-status codes (docs/sdk.md §11). Match against
 // these with errors.Is; a real *APIError always carries the server's own
 // Detail/HTTPStatus, these sentinels only pin the stable Code.
+//
+// ⚠️ Treat every sentinel below as read-only. APIError's fields (Err,
+// HTTPStatus, Response) are exported so this package can populate a fresh
+// *APIError from a real server response (see mapError/
+// newAPIErrorFromResponse) — but that same mutability means code with a
+// reference to one of these package-level sentinels could, in principle,
+// mutate it in place (e.g. ErrNotFound.Err.Code = "..."), corrupting
+// errors.Is matching for every other caller in the process for the
+// lifetime of the program. Never write to a sentinel's fields; construct
+// your own *APIError (or use fmt.Errorf's %w) if you need a similar but
+// distinct error value.
 var (
 	ErrNotFound            = &APIError{HTTPStatus: 404, Err: Error{Code: "NOT_FOUND"}}
 	ErrUnauthorized        = &APIError{HTTPStatus: 401, Err: Error{Code: "UNAUTHORIZED"}}
@@ -118,6 +129,16 @@ var (
 	// decryption — machine files, unlike license files, need both the
 	// license key AND the target machine's fingerprint to decrypt.
 	ErrFingerprintRequired = errors.New("tamga: machine fingerprint is required to decrypt an encrypted machine file")
+	// ErrMachineOverLimit is returned by ActivateMachine when validation
+	// reports an over-limit ValidationCode (TOO_MANY_MACHINES/
+	// TOO_MANY_CORES/TOO_MUCH_MEMORY/TOO_MUCH_DISK/TOO_MANY_PROCESSES)
+	// after machine creation. By the time this error is returned, the
+	// just-created machine has already been deleted (rollback) — the
+	// returned *Machine is nil, and the accompanying *ValidationMeta still
+	// carries the exact ValidationCode for callers that want to
+	// distinguish which limit was exceeded. errors.Is(err,
+	// ErrMachineOverLimit) matches regardless of wrapping.
+	ErrMachineOverLimit = errors.New("tamga: machine activation rolled back: over policy limit")
 )
 
 // newAPIErrorFromResponse maps a decoded ErrorResponse's first Error to an

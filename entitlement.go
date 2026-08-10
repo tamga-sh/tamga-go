@@ -54,7 +54,7 @@ type EntitlementPage struct {
 // ListEntitlements lists a license's entitlements, keyset-paginated.
 // GET /v1/accounts/{account_id}/licenses/{license_id}/entitlements.
 func (c *Client) ListEntitlements(ctx context.Context, licenseID string, opts ListOptions) (*EntitlementPage, error) {
-	path := fmt.Sprintf("/licenses/%s/entitlements", licenseID)
+	path := fmt.Sprintf("/licenses/%s/entitlements", escapePathSegment(licenseID))
 	query := url.Values{}
 	if opts.Limit > 0 {
 		query.Set("limit", strconv.Itoa(opts.Limit))
@@ -81,7 +81,7 @@ func (c *Client) ListEntitlements(ctx context.Context, licenseID string, opts Li
 // GetEntitlement fetches a single entitlement by ID.
 // GET /v1/accounts/{account_id}/licenses/{license_id}/entitlements/{entitlement_id}.
 func (c *Client) GetEntitlement(ctx context.Context, licenseID, entitlementID string) (*Entitlement, error) {
-	path := fmt.Sprintf("/licenses/%s/entitlements/%s", licenseID, entitlementID)
+	path := fmt.Sprintf("/licenses/%s/entitlements/%s", escapePathSegment(licenseID), escapePathSegment(entitlementID))
 	entitlement, err := decodeJSONAPI[Entitlement](ctx, c, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -102,6 +102,20 @@ type entitlementCacheEntry struct {
 
 // entitlementCache is a simple in-memory TTL cache of per-license
 // entitlement code sets, backing HasEntitlement. Safe for concurrent use.
+//
+// Entries are only evicted by TTL staleness (entitlementCacheTTL) on the
+// next HasEntitlement call for that license, or explicitly via
+// InvalidateEntitlementCache — there is no bounded-size/LRU eviction. This
+// is a deliberate scope decision, not an oversight: this cache is keyed by
+// license ID, and a single embedded/client SDK instance realistically
+// validates a small, bounded number of distinct licenses over its
+// lifetime (typically one — the license the host application itself is
+// running under) — not an open-ended set driven by untrusted input where
+// unbounded growth would be a real memory-exhaustion concern. If a future
+// use case needs many distinct licenses tracked concurrently (e.g. a
+// server-side integration validating licenses on behalf of many
+// customers), add bounded eviction then; building it speculatively today
+// would be complexity without a driving requirement.
 type entitlementCache struct {
 	entries map[string]entitlementCacheEntry
 	mu      sync.Mutex

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -107,6 +108,46 @@ func TestHasEntitlement_CacheHitAvoidsSecondHTTPCall(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("calls = %d, want 2 after explicit cache invalidation", calls)
+	}
+}
+
+// TestHasEntitlement_ConcurrentAccessIsRaceFree exercises the
+// entitlementCache's sync.Mutex-protected lazy-init (entCacheOnce) and
+// read/write paths from many goroutines at once, across several license
+// IDs (so both the "first fetch populates the cache" and "concurrent
+// readers hit an already-populated entry" code paths run concurrently).
+// Run with `go test -race` to actually catch a data race, not just
+// exercise the code.
+func TestHasEntitlement_ConcurrentAccessIsRaceFree(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[` + sprintfEnt("ent-1", "Pro Features", "pro") + `]}`))
+	})
+	defer closeFn()
+
+	const goroutines = 50
+	const licenseIDs = 5
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			licenseID := fmt.Sprintf("lic-%d", i%licenseIDs)
+			has, err := c.HasEntitlement(context.Background(), licenseID, "pro")
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !has {
+				errs <- fmt.Errorf("HasEntitlement(%q, \"pro\") = false, want true", licenseID)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
 

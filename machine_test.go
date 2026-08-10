@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,7 +40,7 @@ func TestCreateMachine_FullOptionalFieldSet(t *testing.T) {
 	platform := "linux"
 	cores := int32(4)
 	memory := int64(1024)
-	disk := int32(2048)
+	disk := int64(2048)
 
 	machine, err := c.CreateMachine(context.Background(), CreateMachineOptions{
 		Fingerprint: "fp-abc123", LicenseID: "lic-id",
@@ -76,6 +77,39 @@ func TestCreateMachine_FingerprintTakenMapping(t *testing.T) {
 	_, err := c.CreateMachine(context.Background(), CreateMachineOptions{Fingerprint: "fp-1", LicenseID: "lic-id"})
 	if !errors.Is(err, ErrFingerprintTaken) {
 		t.Fatalf("errors.Is(err, ErrFingerprintTaken) = false, err = %v", err)
+	}
+}
+
+func TestDeleteMachine_Success(t *testing.T) {
+	var gotMethod, gotPath string
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	})
+	defer closeFn()
+
+	if err := c.DeleteMachine(context.Background(), "mach-id"); err != nil {
+		t.Fatalf("DeleteMachine() error = %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("method = %s, want DELETE", gotMethod)
+	}
+	if !strings.HasSuffix(gotPath, "/machines/mach-id") {
+		t.Errorf("path = %q", gotPath)
+	}
+}
+
+func TestDeleteMachine_ErrorMapping(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errors":[{"id":"e1","status":"404","code":"NOT_FOUND","title":"Not Found","detail":"no such machine"}]}`))
+	})
+	defer closeFn()
+
+	err := c.DeleteMachine(context.Background(), "missing-id")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("errors.Is(err, ErrNotFound) = false, err = %v", err)
 	}
 }
 
@@ -134,12 +168,19 @@ func TestActivateMachine_RollbackDeleteOnTooManyMachines(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	_, meta, err := c.ActivateMachine(context.Background(), CreateMachineOptions{Fingerprint: "fp-1", LicenseID: "lic-id"}, nil)
-	if err != nil {
-		t.Fatalf("ActivateMachine() error = %v", err)
+	machine, meta, err := c.ActivateMachine(context.Background(), CreateMachineOptions{Fingerprint: "fp-1", LicenseID: "lic-id"}, nil)
+	// On the rollback path, ActivateMachine must return a non-nil error
+	// matching ErrMachineOverLimit — the machine has already been deleted
+	// server-side, so err == nil here would hand the caller a stale ID as
+	// if activation had succeeded.
+	if !errors.Is(err, ErrMachineOverLimit) {
+		t.Fatalf("errors.Is(err, ErrMachineOverLimit) = false, err = %v", err)
 	}
-	if meta.Code != ValidationCodeTooManyMachines {
-		t.Fatalf("meta.Code = %v", meta.Code)
+	if machine != nil {
+		t.Fatalf("machine = %+v, want nil (it was deleted on rollback)", machine)
+	}
+	if meta == nil || meta.Code != ValidationCodeTooManyMachines {
+		t.Fatalf("meta = %+v, want Code = TOO_MANY_MACHINES", meta)
 	}
 	if !deleted {
 		t.Fatal("expected the over-limit machine to be deleted, but DELETE was never called")
@@ -222,6 +263,71 @@ func TestHeartbeatScheduler_TicksAndStopsOnCancel(t *testing.T) {
 	}
 	if ticks < 2 {
 		t.Fatalf("ticks = %d, want at least 2 within the deadline window", ticks)
+	}
+}
+
+// TestHeartbeatScheduler_WithOnTickIsObservableExternally proves
+// WithHeartbeatOnTick is actually reachable and usable from outside this
+// package — a caller can observe every ping's (*Machine, error) result,
+// e.g. to detect a DEAD HeartbeatStatus per tick.
+func TestHeartbeatScheduler_WithOnTickIsObservableExternally(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":` + representativeMachineJSON + `}`))
+	})
+	defer closeFn()
+
+	var mu sync.Mutex
+	var observed []*Machine
+	scheduler := NewHeartbeatScheduler(c, "mach-id", 10*time.Millisecond, WithHeartbeatOnTick(func(m *Machine, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil {
+			observed = append(observed, m)
+		}
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer cancel()
+	_ = scheduler.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(observed) == 0 {
+		t.Fatal("WithHeartbeatOnTick callback was never invoked")
+	}
+	if observed[0].Attributes.Fingerprint != "fp-abc123" {
+		t.Errorf("observed machine = %+v", observed[0])
+	}
+}
+
+// TestProcessHeartbeatScheduler_WithOnTickIsObservableExternally is the
+// ProcessHeartbeatScheduler equivalent of the test above.
+func TestProcessHeartbeatScheduler_WithOnTickIsObservableExternally(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":{"id":"proc-id","type":"processes","attributes":{"pid":"1234","machine_id":"mach-id","last_heartbeat_at":"2026-01-01T00:00:00Z","metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}}`))
+	})
+	defer closeFn()
+
+	var mu sync.Mutex
+	var ticks int
+	scheduler := NewProcessHeartbeatScheduler(c, "proc-id", 10*time.Millisecond, WithProcessHeartbeatOnTick(func(p *Process, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil {
+			ticks++
+		}
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	defer cancel()
+	_ = scheduler.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if ticks == 0 {
+		t.Fatal("WithProcessHeartbeatOnTick callback was never invoked")
 	}
 }
 

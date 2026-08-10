@@ -50,7 +50,7 @@ func (c *Client) GenerateOfflineProof(ctx context.Context, machineID string, dat
 		dataset = map[string]any{}
 	}
 	body := map[string]any{"meta": map[string]any{"dataset": dataset}}
-	path := fmt.Sprintf("/machines/%s/actions/generate-offline-proof", machineID)
+	path := fmt.Sprintf("/machines/%s/actions/generate-offline-proof", escapePathSegment(machineID))
 
 	type proofMeta struct {
 		Proof string `json:"proof"`

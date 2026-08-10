@@ -125,6 +125,21 @@ func (c *Client) buildURL(path string) string {
 	return c.baseURL + "/v1/accounts/" + url.PathEscape(c.accountID) + path
 }
 
+// escapePathSegment escapes id for safe interpolation into a request path
+// (e.g. fmt.Sprintf("/licenses/%s/actions/validate", escapePathSegment(licenseID))).
+// Every resource/relationship ID this package accepts from a caller
+// (license/machine/entitlement/component/process IDs) MUST be passed
+// through this before being embedded in a path — an unescaped ID
+// containing '/', '?', '#', or other URL-meaningful characters could
+// otherwise redirect the request to a different path or inject query
+// parameters (e.g. a licenseID of "abc/../other-account/licenses" or
+// "abc?foo=bar"). accountID gets the same treatment via url.PathEscape
+// directly in buildURL above; this is the equivalent for every other ID
+// this package builds paths from.
+func escapePathSegment(id string) string {
+	return url.PathEscape(id)
+}
+
 // newRequest builds an *http.Request against path with the configured
 // auth transport, Tamga-Version, Tamga-OTP (if set), and User-Agent
 // applied. body, if non-nil, is JSON-marshaled and sent with
@@ -171,6 +186,11 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 // only, no server-provided detail) if the body isn't valid JSON:API error
 // JSON — a non-JSON error page (e.g. from a proxy in front of the API)
 // must not panic or silently swallow the failure.
+//
+// mapError takes ownership of closing resp.Body (it must read the full
+// body to parse it as JSON, then closes it). Callers must not also close
+// resp.Body when they call mapError — only close it themselves on the
+// success path they handle separately, or the body gets double-closed.
 func mapError(resp *http.Response) error {
 	defer func() { _ = resp.Body.Close() }()
 	info := ResponseInfoFromHeader(resp.Header)
@@ -298,10 +318,14 @@ func doNoContent(ctx context.Context, c *Client, method, path string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// mapError takes ownership of closing resp.Body on the error path (see
+	// its own doc comment) — closing it here unconditionally as well
+	// would double-close it. Only close on the success path below,
+	// matching decodeJSONAPI/decodeJSONAPIWithMeta/decodeFlat's pattern.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return mapError(resp)
 	}
+	_ = resp.Body.Close()
 	return nil
 }
 
@@ -321,10 +345,13 @@ func doRawText(ctx context.Context, c *Client, method, path string, query url.Va
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	// See doNoContent's comment: mapError closes resp.Body itself on the
+	// error path, so the defer-close below must only be registered once
+	// we know we're on the success path, to avoid a double close.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", mapError(resp)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("tamga: read response body: %w", err)

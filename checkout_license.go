@@ -95,7 +95,7 @@ type licenseFileResource struct {
 // checkout twice yields two different certificates (a different signature
 // nonce for the encrypted variant).
 func (c *Client) CheckOutLicense(ctx context.Context, licenseID string, opts CheckOutOptions) (*LicenseFile, error) {
-	path := fmt.Sprintf("/licenses/%s/actions/check-out", licenseID)
+	path := fmt.Sprintf("/licenses/%s/actions/check-out", escapePathSegment(licenseID))
 	if opts.UsePOST {
 		return c.checkOutLicensePOST(ctx, path, opts)
 	}

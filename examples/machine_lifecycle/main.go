@@ -16,6 +16,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -59,18 +60,22 @@ func main() {
 	// ActivateMachine composes CreateMachine + ValidateByID, deleting the
 	// just-created machine again if validation comes back over-limit
 	// (TOO_MANY_MACHINES/TOO_MANY_CORES/etc.) — see machine.go's doc
-	// comment for why creation alone never enforces limits.
+	// comment for why creation alone never enforces limits. On that
+	// rollback path it returns a nil *Machine and an error matching
+	// ErrMachineOverLimit — the machine has already been deleted
+	// server-side by the time it returns, so check err before touching
+	// the returned machine.
 	machine, meta, err := client.ActivateMachine(ctx, tamga.CreateMachineOptions{
 		Fingerprint: *fingerprint,
 		LicenseID:   *licenseID,
 	}, nil)
 	if err != nil {
+		if errors.Is(err, tamga.ErrMachineOverLimit) {
+			log.Fatalf("activation rejected (code=%s) — the over-limit machine row has already been rolled back", meta.Code)
+		}
 		log.Fatalf("ActivateMachine: %v", err)
 	}
 	fmt.Printf("activated machine %s: valid=%v code=%s\n", machine.ID, meta.Valid, meta.Code)
-	if !meta.Valid {
-		log.Fatalf("activation rejected (code=%s) — the over-limit machine row, if any, has already been rolled back", meta.Code)
-	}
 
 	if *heartbeat {
 		hbCtx, cancel := context.WithTimeout(ctx, 3*tamga.DefaultHeartbeatInterval)

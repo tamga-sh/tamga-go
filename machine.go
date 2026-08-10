@@ -71,7 +71,7 @@ type CreateMachineOptions struct {
 	Platform    *string
 	Cores       *int32
 	Memory      *int64
-	Disk        *int32
+	Disk        *int64
 	Metadata    map[string]any
 	Fingerprint string
 	LicenseID   string
@@ -124,7 +124,7 @@ func (c *Client) CreateMachine(ctx context.Context, opts CreateMachineOptions) (
 
 // DeleteMachine deletes a machine. DELETE /v1/accounts/{account_id}/machines/{id}.
 func (c *Client) DeleteMachine(ctx context.Context, machineID string) error {
-	return doNoContent(ctx, c, "DELETE", fmt.Sprintf("/machines/%s", machineID))
+	return doNoContent(ctx, c, "DELETE", fmt.Sprintf("/machines/%s", escapePathSegment(machineID)))
 }
 
 // isOverageCode reports whether code is one of the over-limit
@@ -149,10 +149,19 @@ func isOverageCode(code ValidationCode) bool {
 // leaving an orphaned machine row behind (see CreateMachine's doc comment
 // for why creation alone doesn't enforce limits).
 //
-// Deletion failures during rollback are not surfaced — the validation
-// result/error is what the caller asked for; a machine left behind after a
-// failed rollback-delete is still visible to normal machine-management
-// calls for manual cleanup.
+// On that rollback path, ActivateMachine returns (nil, meta, err) with err
+// matching ErrMachineOverLimit (via errors.Is) — NOT (machine, meta, nil).
+// The machine has already been deleted server-side by the time this
+// returns; a caller that only checked `err == nil` before Section §4's
+// review would have been handed a stale, deleted machine's ID as if
+// activation had succeeded. meta is still populated so callers that want
+// the exact ValidationCode (to decide messaging, retry policy, etc.) can
+// inspect it despite the error.
+//
+// Deletion failures during rollback are not surfaced beyond that — the
+// ErrMachineOverLimit/meta pair is what the caller most needs; a machine
+// left behind after a failed rollback-delete is still visible to normal
+// machine-management calls for manual cleanup.
 func (c *Client) ActivateMachine(ctx context.Context, opts CreateMachineOptions, scope *Scope) (*Machine, *ValidationMeta, error) {
 	machine, err := c.CreateMachine(ctx, opts)
 	if err != nil {
@@ -166,6 +175,7 @@ func (c *Client) ActivateMachine(ctx context.Context, opts CreateMachineOptions,
 
 	if isOverageCode(meta.Code) {
 		_ = c.DeleteMachine(ctx, machine.ID)
+		return nil, meta, fmt.Errorf("%w (code=%s)", ErrMachineOverLimit, meta.Code)
 	}
 
 	return machine, meta, nil
@@ -175,7 +185,7 @@ func (c *Client) ActivateMachine(ctx context.Context, opts CreateMachineOptions,
 // POST /v1/accounts/{account_id}/machines/{id}/actions/ping-heartbeat, no
 // body. Returns the updated machine resource.
 func (c *Client) PingHeartbeat(ctx context.Context, machineID string) (*Machine, error) {
-	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/ping-heartbeat", machineID), nil)
+	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/ping-heartbeat", escapePathSegment(machineID)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +196,7 @@ func (c *Client) PingHeartbeat(ctx context.Context, machineID string) (*Machine,
 // NOT_STARTED. POST /v1/accounts/{account_id}/machines/{id}/actions/reset-heartbeat,
 // no body.
 func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine, error) {
-	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/reset-heartbeat", machineID), nil)
+	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/reset-heartbeat", escapePathSegment(machineID)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -211,14 +221,35 @@ type HeartbeatScheduler struct {
 // machine heartbeat window.
 const DefaultHeartbeatInterval = machineHeartbeatWindow / 3
 
+// HeartbeatSchedulerOption configures a HeartbeatScheduler built via
+// NewHeartbeatScheduler.
+type HeartbeatSchedulerOption func(*HeartbeatScheduler)
+
+// WithHeartbeatOnTick registers fn to be called after every ping attempt
+// (success or error), the only way to observe each tick's outcome from
+// outside this package — in particular, to detect a DEAD HeartbeatStatus
+// on the returned Machine and react per HeartbeatScheduler's doc comment
+// ("re-activate rather than retry ping"), or to log/alert on a failed
+// ping. Without this option, Run() still pings on schedule but a caller
+// has no way to observe the per-tick result short of polling the machine
+// separately.
+func WithHeartbeatOnTick(fn func(*Machine, error)) HeartbeatSchedulerOption {
+	return func(s *HeartbeatScheduler) { s.onTick = fn }
+}
+
 // NewHeartbeatScheduler builds a HeartbeatScheduler for machineID, pinging
 // every DefaultHeartbeatInterval unless overridden by interval (pass 0 to
-// use the default).
-func NewHeartbeatScheduler(c *Client, machineID string, interval time.Duration) *HeartbeatScheduler {
+// use the default). Pass WithHeartbeatOnTick to observe each tick's
+// PingHeartbeat result.
+func NewHeartbeatScheduler(c *Client, machineID string, interval time.Duration, opts ...HeartbeatSchedulerOption) *HeartbeatScheduler {
 	if interval <= 0 {
 		interval = DefaultHeartbeatInterval
 	}
-	return &HeartbeatScheduler{client: c, machineID: machineID, interval: interval}
+	s := &HeartbeatScheduler{client: c, machineID: machineID, interval: interval}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Run pings on Ticker's schedule until ctx is canceled, then returns
@@ -306,7 +337,7 @@ type ComponentPage struct {
 // set to the last item's ID when a full page was returned; pass it as the
 // next call's ListOptions.After.
 func (c *Client) ListComponents(ctx context.Context, machineID string, opts ListOptions) (*ComponentPage, error) {
-	path := fmt.Sprintf("/machines/%s/components", machineID)
+	path := fmt.Sprintf("/machines/%s/components", escapePathSegment(machineID))
 	query := url.Values{}
 	if opts.Limit > 0 {
 		query.Set("limit", strconv.Itoa(opts.Limit))
@@ -404,7 +435,7 @@ func (c *Client) CreateProcess(ctx context.Context, opts CreateProcessOptions) (
 // The process heartbeat window is a hardcoded 30 seconds with no
 // resurrection grace period — see ProcessHeartbeatScheduler's doc comment.
 func (c *Client) PingProcess(ctx context.Context, processID string) (*Process, error) {
-	process, err := decodeJSONAPI[Process](ctx, c, "POST", fmt.Sprintf("/processes/%s/actions/ping", processID), nil)
+	process, err := decodeJSONAPI[Process](ctx, c, "POST", fmt.Sprintf("/processes/%s/actions/ping", escapePathSegment(processID)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -428,14 +459,34 @@ type ProcessHeartbeatScheduler struct {
 	interval  time.Duration
 }
 
+// ProcessHeartbeatSchedulerOption configures a ProcessHeartbeatScheduler
+// built via NewProcessHeartbeatScheduler.
+type ProcessHeartbeatSchedulerOption func(*ProcessHeartbeatScheduler)
+
+// WithProcessHeartbeatOnTick registers fn to be called after every ping
+// attempt (success or error) — the only way to observe each tick's
+// outcome from outside this package. See WithHeartbeatOnTick's doc
+// comment for the equivalent on HeartbeatScheduler; this is the same
+// pattern for processes, whose hardcoded 30s window and lack of a
+// resurrection grace period make observing a failed ping promptly more
+// important than for machines.
+func WithProcessHeartbeatOnTick(fn func(*Process, error)) ProcessHeartbeatSchedulerOption {
+	return func(s *ProcessHeartbeatScheduler) { s.onTick = fn }
+}
+
 // NewProcessHeartbeatScheduler builds a ProcessHeartbeatScheduler for
 // processID, pinging every DefaultProcessHeartbeatInterval unless
-// overridden by interval (pass 0 to use the default).
-func NewProcessHeartbeatScheduler(c *Client, processID string, interval time.Duration) *ProcessHeartbeatScheduler {
+// overridden by interval (pass 0 to use the default). Pass
+// WithProcessHeartbeatOnTick to observe each tick's PingProcess result.
+func NewProcessHeartbeatScheduler(c *Client, processID string, interval time.Duration, opts ...ProcessHeartbeatSchedulerOption) *ProcessHeartbeatScheduler {
 	if interval <= 0 {
 		interval = DefaultProcessHeartbeatInterval
 	}
-	return &ProcessHeartbeatScheduler{client: c, processID: processID, interval: interval}
+	s := &ProcessHeartbeatScheduler{client: c, processID: processID, interval: interval}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Run pings on Ticker's schedule until ctx is canceled, then returns
