@@ -99,6 +99,27 @@ var (
 // "Known Server-Side Gaps" #5) — deliberately not modeled as a sentinel
 // here; do not build client-side 429/backoff handling against it.
 
+// Local (client-side, non-API) verification errors returned by
+// (*LicenseFile).Verify and (*MachineFile).Verify — distinct from the
+// server-error sentinels above (ErrLicenseKeyMissing/ErrLicenseNotEncrypted
+// map to actual 422 API responses from a checkout *request*; these two are
+// raised locally, offline, when Verify() itself is called without material
+// its target file's algorithm requires to decrypt).
+var (
+	// ErrLicenseKeyRequired is returned when Verify is called with an
+	// empty license key against a file whose alg requires decryption
+	// (aes-256-gcm+...). Not the same condition as the server-side
+	// ErrLicenseKeyMissing/ErrLicenseNotEncrypted sentinels, which come
+	// from an API response to a checkout *request*, not a local Verify
+	// call against an already-downloaded file.
+	ErrLicenseKeyRequired = errors.New("tamga: license key is required to decrypt an encrypted checkout file")
+	// ErrFingerprintRequired is returned when (*MachineFile).Verify is
+	// called with an empty fingerprint against a file whose alg requires
+	// decryption — machine files, unlike license files, need both the
+	// license key AND the target machine's fingerprint to decrypt.
+	ErrFingerprintRequired = errors.New("tamga: machine fingerprint is required to decrypt an encrypted machine file")
+)
+
 // newAPIErrorFromResponse maps a decoded ErrorResponse's first Error to an
 // *APIError carrying the actual HTTP status and server-provided Detail.
 // Because Is() matches only on Code, errors.Is(err, ErrFingerprintTaken)
