@@ -13,11 +13,16 @@ truth: [`tamga-api`'s `docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/
 paraphrased from `docs/plans/` in the server repo (where the two disagree, `sdk.md` reflects
 actual runtime behavior and wins).
 
-**Current state: Sections A–D, G, I, J, K implemented and tested** (client/transport, license
-validate/check-in, machine/component/process management + heartbeats, entitlements, error model,
-policy enums). **Sections E, F, H (all cryptographic verification: license checkout, machine
-checkout, offline proof) are next** — see `docs/plans/tamga-go.plan.md` for the authoritative
-checkbox state. Sections L (docs/examples) and M (CI/release automation) are not started.
+**Current state: all sections (A–M) implemented, tested, and committed** — client/transport,
+license validate/check-in, machine/component/process management + heartbeats, entitlements, error
+model, policy enums, license/machine checkout crypto, offline proof, docs/examples, and CI/release
+automation. Every mandatory `security-reviewer` gate (Sections E/F/H) passed with zero
+CRITICAL/HIGH findings after fixes; a non-mandatory `ecc:go-review` pass across the remaining
+sections also found and fixed 3 HIGH/5 MEDIUM/2 LOW issues (path/query injection via unescaped
+sub-resource IDs, an `ActivateMachine` bug that returned success after a rollback delete, and an
+unreachable heartbeat-scheduler callback, among others). See
+`docs/plans/tamga-go.plan.md` for the full checkbox state (100%) and every deviation from the
+plan's literal wording, documented inline at each section.
 
 Resource/relationship IDs are plain Go `string`s throughout, not a dedicated UUID type — see
 `license.go`'s `License` doc comment and the deviation note at the top of the plan's Section B for
