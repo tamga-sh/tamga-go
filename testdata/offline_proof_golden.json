@@ -1,0 +1,12 @@
+{
+  "account_id": "01926b3e-0000-7000-8000-000000000000",
+  "dataset": {
+    "cores": 4
+  },
+  "fingerprint": "fp-abc",
+  "machine_id": "01926b3e-1111-7000-8000-000000000000",
+  "note": "TEST-ONLY fixture, not production data. Canonical alphabetically-ordered payload JSON + a valid v1x0. proof over it under testdata/rsa_test_keypair.pem's public key.",
+  "payload_json": "{\"account\":{\"id\":\"01926b3e-0000-7000-8000-000000000000\"},\"dataset\":{\"cores\":4},\"machine\":{\"fingerprint\":\"fp-abc\",\"id\":\"01926b3e-1111-7000-8000-000000000000\"}}",
+  "proof": "v1x0.W7JR7lKDK+cWCFbDYJjMTjYxIrc6YeG4tnU3VPFv1zjq7w678LU57L+ObVcwa7wD9dhkrPyrJGTH/AGWKaXOYR06e1uQjCPGvliZ7goirzziec6iVYo4Q6bpX6j7LXYZor4fuhylVCkLQz5tJEcmCATeSwdOY5uUbR7FXCaCfj6OH7bwY9VkSk8XiZIFKove03jkzbpCZmWIHphj20I9Fd0h/JLU8wnPlV+EZ6YqqUmLRujYAT6LfiNb+Rg/e14sqNbafumIhAx3DHwCQrClqC57OuEsPR9xljdxn2vFJ7JhRXaM/JgeBusy5SZjtgglk4YOBOPhGdJthRhdIOqlJg==",
+  "rsa_pubkey_spki_b64": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvAnKBijUfGKXL5Iv5A7hPKtTV3eYsT+CWFAZdgY5fuhGRuA8KvUpWPLGwalzMTefInDqi92Gnea8dJfmEINT7bxINGSI75gkVDd3gRR6e3gZ2CGFAOMfBgzpcTuMir8U+3jLPiJLg9eDG6dEkHdqznUmfl95y9R/F/I3kcmmI0dJFMag8wPNidVNsKZTlCK9/JPpgLhl0jSQcdaB1PcaGjK0kA3a5u9tqzkZD/WuqL8MI7fu0AMbSV7LHbkPpckucKTNy+Cd+JKSuEm0v2/v32ySo5SIpaBuDv9y7gakUdEjIWeV/oKBrNq6GdV4cEdyX1CcKdKodTJFqblxqDR1NQIDAQAB"
+}
