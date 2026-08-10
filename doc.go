@@ -7,16 +7,26 @@
 // rather than layouts that hide the public API behind an internal pkg/
 // directory (see docs/plans/tamga-go.plan.md §2 Architecture).
 //
-// # Scaffold status
+// # Getting started
 //
-// This repository is currently infrastructure-only. No exported type below
-// implements real HTTP or cryptographic logic yet — every file is a stub
-// carrying only the doc comment describing its eventual contents, per
-// docs/plans/tamga-go.plan.md Section A. Real implementation lands
-// section-by-section (B through M) in a dedicated follow-up session; see
-// that plan file's checkbox list for the authoritative work breakdown, and
-// /Users/neco/Projects/tamga-api/docs/sdk.md for the protocol this SDK
-// implements against.
+// Construct a Client with New, providing an account ID and an auth
+// transport (WithLicenseKey is the primary transport for embedded/client
+// SDKs and this package's own default):
+//
+//	client, err := tamga.New("your-account-id", tamga.WithLicenseKey("YOUR-LICENSE-KEY"))
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	license, meta, err := client.ValidateByKey(context.Background(), "YOUR-LICENSE-KEY")
+//
+// See the examples/ directory (not part of this package, run individually
+// via `go run ./examples/<name>`) for full runnable programs covering
+// validation, check-in, offline license/machine file verification, the
+// machine lifecycle, and entitlement checks. See
+// docs/plans/tamga-go.plan.md for the full implementation task breakdown
+// this package was built against, and
+// https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md for the
+// protocol reference.
 //
 // # File map
 //

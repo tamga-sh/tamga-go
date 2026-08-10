@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -217,11 +218,29 @@ func TestCheckIn_CheckInNotRequiredMapsToSentinel(t *testing.T) {
 	}
 }
 
-// Example demonstrates the ValidateByKey happy path (Section L godoc
-// example requirement).
-func Example_validateByKey() {
-	// See examples/validate/main.go for a full runnable program against a
-	// real server. This Example exists to satisfy Section L's "at least
-	// ValidateByKey" godoc Example requirement without a live network
-	// dependency in `go test`.
+// ExampleClient_ValidateByKey demonstrates validating a license by its raw
+// key — the simplest way to check a license without knowing its ID. See
+// examples/validate/main.go for a full runnable program against a real
+// server; this Example runs against a local httptest server so it stays a
+// real, executable test with no live network dependency.
+func ExampleClient_ValidateByKey() {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":` + representativeLicenseJSON + `,"meta":{"ts":"2026-01-01T00:00:00Z","valid":true,"detail":"is valid","code":"VALID"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New("acct-123", WithBaseURL(server.URL), WithLicenseKey("lic-abc123"))
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	_, meta, err := client.ValidateByKey(context.Background(), "lic-abc123")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Printf("valid=%v code=%s\n", meta.Valid, meta.Code)
+	// Output: valid=true code=VALID
 }

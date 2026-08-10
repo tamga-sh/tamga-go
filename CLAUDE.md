@@ -64,7 +64,7 @@ directly. Go's `internal/` import restriction enforces that boundary at compile 
 ## Dev Commands
 
 ```bash
-just test    # go test ./... -race -cover
+just test    # go test ./ ./internal/... -race -cover (excludes examples/, which has no tests)
 just lint    # golangci-lint run ./...
 just fmt     # gofmt -l -w . && goimports -w .
 just build   # go build ./...

@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"testing"
@@ -395,8 +396,46 @@ func TestVerifyOfflineProof_NilPubKeyReturnsErrorNotPanic(t *testing.T) {
 	}
 }
 
-// Example demonstrates GenerateOfflineProof/VerifyOfflineProof usage
-// (Section L godoc example requirement) — see
-// examples/machine_lifecycle/main.go for a full runnable program.
-func Example_verifyOfflineProof() {
+// ExampleVerifyOfflineProof demonstrates verifying a "v1x0."-prefixed
+// offline proof entirely offline, once the account's RSA public key is
+// embedded in the calling application. See
+// examples/machine_lifecycle/main.go for a full runnable program that
+// calls GenerateOfflineProof over the network first.
+func ExampleVerifyOfflineProof() {
+	priv := genRSAKeypairForExample()
+	accountID, machineID, fingerprint := "acc-1", "mach-1", "fp-abc"
+	dataset := map[string]any{"cores": 4}
+
+	// A real application receives proof from GenerateOfflineProof; built
+	// by hand here so this example has no network dependency.
+	payloadJSON, err := buildOfflineProofPayloadJSON(accountID, machineID, fingerprint, dataset)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	digest := sha256.Sum256(payloadJSON)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, digest[:])
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	proof := ProofPrefix + base64.StdEncoding.EncodeToString(sig)
+
+	err = VerifyOfflineProof(&priv.PublicKey, accountID, machineID, fingerprint, dataset, proof)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("proof verified")
+	// Output: proof verified
+}
+
+// genRSAKeypairForExample avoids sharing *testing.T-typed
+// test helpers with this package-level Example function.
+func genRSAKeypairForExample() *rsa.PrivateKey {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
+	return priv
 }

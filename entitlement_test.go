@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -113,8 +114,28 @@ func sprintfEnt(id, name, code string) string {
 	return fmt.Sprintf(representativeEntitlementJSONTmpl, id, name, code)
 }
 
-// Example demonstrates HasEntitlement usage (Section L godoc example
-// requirement) — see examples/entitlements/main.go for a full runnable
-// program.
-func Example_hasEntitlement() {
+// ExampleClient_HasEntitlement demonstrates checking whether a license has
+// a given entitlement, matching on Code (never Name — see
+// EntitlementAttributes' doc comment). See examples/entitlements/main.go
+// for a full runnable program.
+func ExampleClient_HasEntitlement() {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[` + sprintfEnt("ent-1", "Pro Features", "pro") + `]}`))
+	}))
+	defer server.Close()
+
+	client, err := New("acct-123", WithBaseURL(server.URL), WithLicenseKey("lic-abc123"))
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	has, err := client.HasEntitlement(context.Background(), "lic-id", "pro")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("has \"pro\" entitlement:", has)
+	// Output: has "pro" entitlement: true
 }

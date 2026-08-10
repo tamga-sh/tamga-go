@@ -3,9 +3,11 @@
 default:
     @just --list
 
-# Run the full test suite with race detection and coverage.
+# Run the full test suite with race detection and coverage. Scoped to
+# "./ ./internal/..." like CI (see ci.yml's comment) — examples/ has no
+# test files and would only add 0%-covered noise to the -cover summary.
 test:
-    go test ./... -race -cover
+    go test ./ ./internal/... -race -cover
 
 # Run golangci-lint (see .golangci.yml for the enabled linter set).
 lint:

@@ -392,8 +392,46 @@ func TestCheckOutLicense_LicenseNotEncryptedMapping(t *testing.T) {
 	}
 }
 
-// Example demonstrates LicenseFile.Verify usage (Section L godoc example
-// requirement) — see examples/checkout_license/main.go for a full runnable
-// program.
-func Example_licenseFileVerify() {
+// ExampleLicenseFile_Verify demonstrates parsing and verifying an offline
+// .lic file entirely offline, once the account's Ed25519 public key is
+// embedded in the calling application. See
+// examples/checkout_license/main.go for a full runnable program that
+// downloads the file over the network first.
+func ExampleLicenseFile_Verify() {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	// A real application embeds pub (the account's public key) and
+	// receives pem from CheckOutLicense — built by hand here so this
+	// example has no network dependency.
+	pem := buildExamplePEM(priv)
+
+	file, err := ParseLicenseFile(pem)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	payload, err := file.Verify(pub, "")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("verified license key:", *payload.Data.Attributes.Key)
+	// Output: verified license key: lic-abc123
+}
+
+// buildExamplePEM builds a plain (unencrypted) .lic PEM signed by priv, for
+// ExampleLicenseFile_Verify's offline-only demonstration.
+func buildExamplePEM(priv ed25519.PrivateKey) string {
+	enc := base64.StdEncoding.EncodeToString([]byte(representativeLicensePayloadJSON()))
+	sig := ed25519.Sign(priv, []byte(enc))
+	cert := certPayload{Enc: enc, Sig: base64.StdEncoding.EncodeToString(sig), Alg: AlgBase64Ed25519}
+	certJSON, err := json.Marshal(cert)
+	if err != nil {
+		panic(err)
+	}
+	body := base64.StdEncoding.EncodeToString(certJSON)
+	return licenseFilePEMHeader + "\n" + body + "\n" + licenseFilePEMFooter
 }

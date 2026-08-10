@@ -34,16 +34,27 @@ jobs:
         with:
           version: latest
 
+      # Scoped to "./ ./internal/..." rather than "./..." — examples/ has
+      # no test files (they're runnable demo programs, go doc ./... and
+      # `go build ./...` still cover compiling them) and would otherwise
+      # show up in coverage.out at 0% coverage, dragging the merged
+      # threshold-total below 80% for reasons unrelated to actual test
+      # quality. This also sidesteps needing shell-specific package-list
+      # filtering (grep/findstr) across the ubuntu/macos/windows matrix.
+      #
       # -race is appended only on the ubuntu leg — it is slow on macOS and
       # Windows runners and this SDK's concurrency surface (HeartbeatScheduler,
       # ProcessHeartbeatScheduler) is adequately covered by the ubuntu leg alone.
       - name: Test (with race detector)
         if: matrix.os == 'ubuntu-latest'
-        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+        run: go test ./ ./internal/... -race -coverprofile=coverage.out -covermode=atomic
 
       - name: Test
         if: matrix.os != 'ubuntu-latest'
-        run: go test ./... -coverprofile=coverage.out -covermode=atomic
+        run: go test ./ ./internal/... -coverprofile=coverage.out -covermode=atomic
+
+      - name: Build everything, including examples
+        run: go build ./...
 
       - name: Enforce coverage floor
         uses: vladopajic/go-test-coverage@v2
