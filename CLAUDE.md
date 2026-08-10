@@ -13,12 +13,15 @@ truth: [`tamga-api`'s `docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/
 paraphrased from `docs/plans/` in the server repo (where the two disagree, `sdk.md` reflects
 actual runtime behavior and wins).
 
-**Current state: scaffold only.** No file below implements real HTTP or crypto logic yet except
-`errors.go` (JSON:API error struct + `Is`/`As`) and `validation.go` (the `ValidationCode` string
-enum) — both intentionally seeded early because nearly every other file's doc comments reference
-them. Everything else is a stub file carrying only a doc comment describing intended contents.
-Do not assume any exported type beyond those two files is usable; check the file's own doc
-comment before writing code against it.
+**Current state: Sections A–D, G, I, J, K implemented and tested** (client/transport, license
+validate/check-in, machine/component/process management + heartbeats, entitlements, error model,
+policy enums). **Sections E, F, H (all cryptographic verification: license checkout, machine
+checkout, offline proof) are next** — see `docs/plans/tamga-go.plan.md` for the authoritative
+checkbox state. Sections L (docs/examples) and M (CI/release automation) are not started.
+
+Resource/relationship IDs are plain Go `string`s throughout, not a dedicated UUID type — see
+`license.go`'s `License` doc comment and the deviation note at the top of the plan's Section B for
+why (this repo's single-external-dependency constraint on `golang.org/x/crypto`).
 
 ## Architecture
 

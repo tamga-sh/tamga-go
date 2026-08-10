@@ -9,12 +9,12 @@ import "errors"
 // See docs/sdk.md §11. code is stable and should drive matching logic;
 // detail is human text and may change between server versions.
 type Error struct {
+	Source *ErrorSource `json:"source,omitempty"`
 	ID     string       `json:"id,omitempty"`
 	Status string       `json:"status,omitempty"`
 	Code   string       `json:"code,omitempty"`
 	Title  string       `json:"title,omitempty"`
 	Detail string       `json:"detail,omitempty"`
-	Source *ErrorSource `json:"source,omitempty"`
 }
 
 // ErrorSource carries the JSON:API error object's optional source.pointer,
@@ -39,8 +39,9 @@ type ErrorResponse struct {
 // sentinel error vars themselves (ErrNotFound, ErrFingerprintTaken, etc.)
 // are not declared yet and land with the endpoints that can return them.
 type APIError struct {
-	HTTPStatus int
 	Err        Error
+	Response   ResponseInfo
+	HTTPStatus int
 }
 
 // Error implements the error interface.
@@ -72,4 +73,47 @@ func (e *APIError) As(target any) bool {
 	}
 	*t = e
 	return true
+}
+
+// Sentinel errors, fixed-status codes (docs/sdk.md §11). Match against
+// these with errors.Is; a real *APIError always carries the server's own
+// Detail/HTTPStatus, these sentinels only pin the stable Code.
+var (
+	ErrNotFound            = &APIError{HTTPStatus: 404, Err: Error{Code: "NOT_FOUND"}}
+	ErrUnauthorized        = &APIError{HTTPStatus: 401, Err: Error{Code: "UNAUTHORIZED"}}
+	ErrForbidden           = &APIError{HTTPStatus: 403, Err: Error{Code: "FORBIDDEN"}}
+	ErrInternal            = &APIError{HTTPStatus: 500, Err: Error{Code: "INTERNAL_SERVER_ERROR"}}
+	ErrKeyTaken            = &APIError{HTTPStatus: 409, Err: Error{Code: "KEY_TAKEN"}}
+	ErrFingerprintTaken    = &APIError{HTTPStatus: 409, Err: Error{Code: "FINGERPRINT_TAKEN"}}
+	ErrPIDTaken            = &APIError{HTTPStatus: 409, Err: Error{Code: "PID_TAKEN"}}
+	ErrCheckInNotRequired  = &APIError{HTTPStatus: 422, Err: Error{Code: "CHECK_IN_NOT_REQUIRED"}}
+	ErrTTLInvalid          = &APIError{HTTPStatus: 422, Err: Error{Code: "TTL_INVALID"}}
+	ErrLicenseNotEncrypted = &APIError{HTTPStatus: 422, Err: Error{Code: "LICENSE_NOT_ENCRYPTED"}}
+	ErrLicenseKeyMissing   = &APIError{HTTPStatus: 422, Err: Error{Code: "LICENSE_KEY_MISSING"}}
+	ErrSchemeNotSupported  = &APIError{HTTPStatus: 422, Err: Error{Code: "SCHEME_NOT_SUPPORTED"}}
+	ErrDatasetInvalid      = &APIError{HTTPStatus: 422, Err: Error{Code: "DATASET_INVALID"}}
+)
+
+// NOTE: 429 TOO_MANY_REQUESTS is declared in the server's error enum but has
+// no constructor and is never returned by any code path today (docs/sdk.md
+// "Known Server-Side Gaps" #5) — deliberately not modeled as a sentinel
+// here; do not build client-side 429/backoff handling against it.
+
+// newAPIErrorFromResponse maps a decoded ErrorResponse's first Error to an
+// *APIError carrying the actual HTTP status and server-provided Detail.
+// Because Is() matches only on Code, errors.Is(err, ErrFingerprintTaken)
+// works against the returned value even though HTTPStatus/Detail differ
+// from the sentinel's own zero-value Detail.
+func newAPIErrorFromResponse(httpStatus int, resp ErrorResponse) *APIError {
+	if len(resp.Errors) == 0 {
+		return &APIError{
+			HTTPStatus: httpStatus,
+			Err: Error{
+				Code:   "UNKNOWN",
+				Title:  "Unknown Error",
+				Detail: "server returned an empty errors array",
+			},
+		}
+	}
+	return &APIError{HTTPStatus: httpStatus, Err: resp.Errors[0]}
 }
