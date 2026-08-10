@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (go${{ matrix.go-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.22", "1.23"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # go-version-file reads the toolchain version from go.mod so it is
+      # declared once, not duplicated between go.mod and this matrix.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      # -race is appended only on the ubuntu leg — it is slow on macOS and
+      # Windows runners and this SDK's concurrency surface (HeartbeatScheduler,
+      # ProcessHeartbeatScheduler) is adequately covered by the ubuntu leg alone.
+      - name: Test (with race detector)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
+
+      - name: Test
+        if: matrix.os != 'ubuntu-latest'
+        run: go test ./... -coverprofile=coverage.out -covermode=atomic
+
+      - name: Enforce coverage floor
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          profile: coverage.out
+          local-prefix: github.com/tamga-sh/tamga-go
+          threshold-total: 80
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

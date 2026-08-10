@@ -1,0 +1,37 @@
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gosimple
+    - ineffassign
+    - unused
+    - gosec
+    - revive
+
+linters-settings:
+  govet:
+    enable-all: true
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+  gosec:
+    excludes:
+      # G115 (int conversion overflow) is noisy on JSON:API numeric
+      # attributes coming from documented-range server fields (cores,
+      # memory, disk, max_uses); revisit narrowly if real findings show up
+      # once implementation lands, rather than disabling class-wide here
+      # without evidence.
+      - G115
+
+issues:
+  exclude-use-default: false
+  # Crypto and checkout code (checkout_license.go, checkout_machine.go,
+  # proof.go, internal/crypto/**) is explicitly in scope for gosec, not
+  # excluded — see docs/plans/tamga-go.plan.md §4's mandatory
+  # security-reviewer gate for those sections.

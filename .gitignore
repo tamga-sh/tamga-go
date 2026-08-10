@@ -1,0 +1,18 @@
+# Build artifacts
+*.test
+*.out
+coverage.out
+coverage.html
+dist/
+
+# Go workspace / tooling
+*.tsbuildinfo
+vendor/
+
+# OS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
