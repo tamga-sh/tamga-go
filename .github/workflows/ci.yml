@@ -56,8 +56,19 @@ jobs:
         run: go test ./ ./internal/... -race -coverprofile=coverage.out -covermode=atomic
 
       - name: Test
-        if: matrix.os != 'ubuntu-latest'
+        if: matrix.os == 'windows-latest'
         run: go test ./ ./internal/... -coverprofile=coverage.out -covermode=atomic
+
+      - name: Test (macOS, external linkmode)
+        # Plain `go test` on macos-latest fails at runtime with
+        # "dyld: missing LC_UUID load command" — Go's internal linker
+        # doesn't emit an LC_UUID load command, which newer macOS
+        # versions require (golang/go#68678, backported to the 1.22/1.23
+        # line this matrix targets but not released as a default fix yet).
+        # -linkmode=external routes linking through the system linker,
+        # which does emit it.
+        if: matrix.os == 'macos-latest'
+        run: go test ./ ./internal/... -ldflags="-linkmode=external" -coverprofile=coverage.out -covermode=atomic
 
       - name: Build everything, including examples
         run: go build ./...
