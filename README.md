@@ -1,5 +1,9 @@
 # tamga-go
 
+[![CI](https://github.com/tamga-sh/tamga-go/actions/workflows/ci.yml/badge.svg)](https://github.com/tamga-sh/tamga-go/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tamga-sh/tamga-go.svg)](https://pkg.go.dev/github.com/tamga-sh/tamga-go)
+[![coverage](https://codecov.io/gh/tamga-sh/tamga-go/branch/main/graph/badge.svg)](https://codecov.io/gh/tamga-sh/tamga-go)
+
 Official Go SDK for Tamga. Integrate license activation, offline verification, and machine
 management into your Go applications.
 
@@ -86,15 +90,12 @@ verification code:**
 
 `checkout_license.go`, `checkout_machine.go`, `proof.go`, and everything under
 `internal/crypto/` carry a mandatory security-reviewer gate before merge for exactly this reason
-— see [`docs/plans/tamga-go.plan.md`](docs/plans/tamga-go.plan.md) §4 and
-[`SECURITY.md`](SECURITY.md).
+— see [`SECURITY.md`](SECURITY.md).
 
 ## Documentation
 
 - [pkg.go.dev/github.com/tamga-sh/tamga-go](https://pkg.go.dev/github.com/tamga-sh/tamga-go) —
   generated API reference.
-- [`docs/plans/tamga-go.plan.md`](docs/plans/tamga-go.plan.md) — implementation plan, task
-  checklist, and architecture for this repository.
 - [`tamga-api`'s `docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md) —
   the authoritative protocol/feature reference this SDK implements against, including the
   server-side gaps that are deliberately out of scope for this SDK's v1.
