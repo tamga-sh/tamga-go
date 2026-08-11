@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # go-version-file reads the toolchain version from go.mod so it is
       # declared once, not duplicated between go.mod and this matrix.
