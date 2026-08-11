@@ -25,7 +25,7 @@ jobs:
       # go-version-file reads the toolchain version from go.mod so it is
       # declared once, not duplicated between go.mod and this matrix.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
