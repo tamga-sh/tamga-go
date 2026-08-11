@@ -63,6 +63,14 @@ jobs:
         run: go build ./...
 
       - name: Enforce coverage floor
+        # vladopajic/go-test-coverage is a Docker container action — GitHub
+        # Actions only supports those on Linux runners, so this step must
+        # not run on the macos-latest/windows-latest matrix legs (it fails
+        # immediately with "Container action is only supported on Linux").
+        # Coverage itself is still measured identically on every OS via the
+        # `go test -coverprofile` step above; only the enforcement gate is
+        # Linux-only.
+        if: matrix.os == 'ubuntu-latest'
         uses: vladopajic/go-test-coverage@v2
         with:
           profile: coverage.out
