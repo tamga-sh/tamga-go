@@ -30,7 +30,13 @@ jobs:
           go-version-file: go.mod
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v6
+        # v7, not v6: v6 only knows how to install golangci-lint v1.x
+        # binaries, but .golangci.yml uses the v2 config schema
+        # (`version: "2"`) — v6 + this config resolves a v1.64.x binary
+        # that then rejects the file's v2-only keys ("formatters",
+        # top-level "version") as unknown. v7 is the first action version
+        # with v2 support.
+        uses: golangci/golangci-lint-action@v7
         with:
           version: latest
 
