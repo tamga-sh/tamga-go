@@ -1,0 +1,12 @@
+# See https://docs.github.com/articles/about-codeowners for syntax.
+# Later matches take precedence.
+
+* @tamga-sh/sdk-maintainers
+
+# Crypto-bearing paths require a security-focused reviewer on every change.
+/checkout_license.go    @tamga-sh/sdk-maintainers @tamga-sh/security
+/checkout_machine.go    @tamga-sh/sdk-maintainers @tamga-sh/security
+/proof.go    @tamga-sh/sdk-maintainers @tamga-sh/security
+/internal/crypto/    @tamga-sh/sdk-maintainers @tamga-sh/security
+
+/.github/workflows/   @tamga-sh/sdk-maintainers
