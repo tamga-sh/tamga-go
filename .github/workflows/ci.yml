@@ -36,7 +36,7 @@ jobs:
         # that then rejects the file's v2-only keys ("formatters",
         # top-level "version") as unknown. v7 is the first action version
         # with v2 support.
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
