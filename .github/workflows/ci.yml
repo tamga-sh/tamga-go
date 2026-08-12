@@ -20,12 +20,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # go-version-file reads the toolchain version from go.mod so it is
       # declared once, not duplicated between go.mod and this matrix.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
@@ -36,7 +36,7 @@ jobs:
         # that then rejects the file's v2-only keys ("formatters",
         # top-level "version") as unknown. v7 is the first action version
         # with v2 support.
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
 
@@ -89,7 +89,7 @@ jobs:
           threshold-total: 80
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
