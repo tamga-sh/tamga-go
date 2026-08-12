@@ -20,8 +20,10 @@
 // stdlib covers every scheme this SDK verifies against except HKDF (needed
 // for machine-file key derivation, docs/sdk.md §6) — golang.org/x/crypto/hkdf
 // has no stdlib equivalent, which is why it is this module's sole external
-// dependency (see docs/plans/tamga-go.plan.md §2).
+// dependency (see ../docs/plans/tamga-go.plan.md §2, one directory up in the
+// sibling tamga-sdk monorepo).
 //
-// No file in this package is implemented yet — see
-// docs/plans/tamga-go.plan.md Sections E, F, and H.
+// Every file in this package is implemented, tested, and has passed a
+// security-reviewer gate (Sections E, F, and H — see
+// ../docs/plans/tamga-go.plan.md for the per-section checklist).
 package crypto
