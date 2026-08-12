@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/tamga-sh/tamga-go/compare/tamga-go-v1.0.0...tamga-go-v1.0.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* enforce P-256 curve in VerifyECDSA (curve-confusion vulnerability) ([5421ba6](https://github.com/tamga-sh/tamga-go/commit/5421ba60f8ac693abc2e4b9f42ef7e1c5654338f))
+* enforce P-256 curve in VerifyECDSA (curve-confusion vulnerability) ([49a1410](https://github.com/tamga-sh/tamga-go/commit/49a141020b0b2c687eed0689fd4d4cd0dfa04dfb))
+
 ## 1.0.0 (2026-08-11)
 
 
