@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `tamga-go` is the official Go SDK for Tamga (license activation, offline verification, machine
 fleet management). Single module, flat top-level `tamga` package — import path equals module
 path (`github.com/tamga-sh/tamga-go`, no `pkg/` nesting), matching `keygen-go` convention. Full
-task breakdown: [`docs/plans/tamga-go.plan.md`](docs/plans/tamga-go.plan.md). Protocol source of
+task breakdown: [`../docs/plans/tamga-go.plan.md`](../docs/plans/tamga-go.plan.md) (lives one directory up, in the sibling `tamga-sdk` monorepo, not inside this repo). Protocol source of
 truth: [`tamga-api`'s `docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md)
 — every field name, endpoint path, and enum value in this SDK is transcribed from that file, not
 paraphrased from `docs/plans/` in the server repo (where the two disagree, `sdk.md` reflects
@@ -21,7 +21,7 @@ CRITICAL/HIGH findings after fixes; a non-mandatory `ecc:go-review` pass across 
 sections also found and fixed 3 HIGH/5 MEDIUM/2 LOW issues (path/query injection via unescaped
 sub-resource IDs, an `ActivateMachine` bug that returned success after a rollback delete, and an
 unreachable heartbeat-scheduler callback, among others). See
-`docs/plans/tamga-go.plan.md` for the full checkbox state (100%) and every deviation from the
+`../docs/plans/tamga-go.plan.md` for the full checkbox state (100%) and every deviation from the
 plan's literal wording, documented inline at each section.
 
 Resource/relationship IDs are plain Go `string`s throughout, not a dedicated UUID type — see
