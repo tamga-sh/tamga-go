@@ -26,24 +26,16 @@ type CheckOutOptions struct {
 // fields from its inner JSON payload, plus the raw PEM text it was parsed
 // from. Call Verify to check the signature (and decrypt, if encrypted).
 type LicenseFile struct {
-	Enc string
-	Sig string
-	Alg string
-	PEM string
-
-	// Certificate metadata, populated only when fetched via the POST
-	// (UsePOST) variant — zero-valued for the raw GET/ParseLicenseFile
-	// path, which has no JSON:API resource wrapper to read them from.
-	ID       string
 	TTL      *int64
 	Expiry   *string
+	Now      func() int64
+	Enc      string
+	Sig      string
+	Alg      string
+	PEM      string
+	ID       string
 	Issued   string
 	Includes []string
-
-	// Now overrides the clock used for the exp check. Nil means the system
-	// clock. Set it to a server-supplied timestamp if you are defending
-	// against a user winding their clock back to revive an expired file.
-	Now func() int64
 }
 
 // Algorithm constants for LicenseFile.Alg — Ed25519 only for the license
@@ -86,7 +78,7 @@ type certPayload struct {
 // dataPayload is what enc decodes/decrypts to:
 // {"data": <resource>, "meta": <claims>}.
 type dataPayload[T any] struct {
-	Data T                 `json:"data"`
+	Data T                  `json:"data"`
 	Meta *LicenseFileClaims `json:"meta"`
 }
 
@@ -95,15 +87,10 @@ type dataPayload[T any] struct {
 // These are the point of format v2: unlike the response envelope, they cannot
 // be edited by whoever holds the file.
 type LicenseFileClaims struct {
-	// IssuedAt, seconds since the Unix epoch.
-	IssuedAt int64 `json:"iat"`
-	// ExpiresAt, seconds since the Unix epoch. Zero (absent) means the file
-	// never expires — checkout was made without a ttl.
-	ExpiresAt int64 `json:"exp"`
-	// ID is unique per checkout — usable for replay detection.
-	ID string `json:"jti"`
-	// KeyID identifies the signing key, so a file survives a key rotation.
-	KeyID string `json:"kid"`
+	ID        string `json:"jti"`
+	KeyID     string `json:"kid"`
+	IssuedAt  int64  `json:"iat"`
+	ExpiresAt int64  `json:"exp"`
 }
 
 // licenseFileResourceAttrs is the license-files JSON:API resource
@@ -216,9 +203,8 @@ func stripPEM(pem, header, footer string) (string, error) {
 // LicensePayload is the {"data": License} payload a verified LicenseFile
 // decodes to.
 type LicensePayload struct {
-	Data License
-	// Claims are the signed iat/exp/jti/kid. Always populated on success.
 	Claims LicenseFileClaims
+	Data   License
 }
 
 // Verify orchestrates the full verify -> decrypt -> parse pipeline for an

@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"math/rand"
+	"net/http"
 	"net/url"
-	"strings"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,15 +28,12 @@ const defaultBaseURL = "https://api.tamga.sh"
 type Client struct {
 	auth         AuthTransport
 	httpClient   *http.Client
-	// maxRetries is how many times a rate-limited request is retried before
-	// giving up. Zero disables automatic retries; the returned *APIError still
-	// carries the server's Retry-After via Response.
-	maxRetries int
 	entCache     *entitlementCache
 	accountID    string
 	baseURL      string
 	apiVersion   string
 	otp          string
+	maxRetries   int
 	entCacheOnce sync.Once
 }
 
@@ -315,6 +312,9 @@ func retryDelay(attempt int, retryAfter int, hasRetryAfter bool) time.Duration {
 		shift = 5
 	}
 	base := time.Duration(1<<uint(shift)) * time.Second
+	//nolint:gosec // jitter only needs to break synchronization across a
+	// retrying fleet, not resist prediction — math/rand is the right tool
+	// here, crypto/rand would be paying an unnecessary syscall per retry.
 	return base + time.Duration(rand.Int63n(int64(time.Second)))
 }
 
