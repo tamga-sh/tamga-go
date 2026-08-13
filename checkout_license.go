@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	internalcrypto "github.com/tamga-sh/tamga-go/internal/crypto"
 )
@@ -25,17 +26,14 @@ type CheckOutOptions struct {
 // fields from its inner JSON payload, plus the raw PEM text it was parsed
 // from. Call Verify to check the signature (and decrypt, if encrypted).
 type LicenseFile struct {
-	Enc string
-	Sig string
-	Alg string
-	PEM string
-
-	// Certificate metadata, populated only when fetched via the POST
-	// (UsePOST) variant — zero-valued for the raw GET/ParseLicenseFile
-	// path, which has no JSON:API resource wrapper to read them from.
-	ID       string
 	TTL      *int64
 	Expiry   *string
+	Now      func() int64
+	Enc      string
+	Sig      string
+	Alg      string
+	PEM      string
+	ID       string
 	Issued   string
 	Includes []string
 }
@@ -43,10 +41,26 @@ type LicenseFile struct {
 // Algorithm constants for LicenseFile.Alg — Ed25519 only for the license
 // checkout signature, independent of the license's own key Scheme (unlike
 // machine checkout in checkout_machine.go, which is scheme-driven).
+//
+// The +v2 suffix is load-bearing. In v1 the ttl/expiry a caller asked for
+// lived only in the JSON:API envelope around the certificate, never inside
+// the signed bytes — so a 24-hour trial file was cryptographically valid
+// forever, because the client is the attacker and any check built on the
+// envelope is bypassed by keeping (or redistributing) the raw certificate
+// string. v2 moves the claims inside the signature. Accepting a v1 file would
+// hand that back, so Verify rejects one outright.
 const (
-	AlgBase64Ed25519    = "base64+ed25519"
-	AlgAES256GCMEd25519 = "aes-256-gcm+ed25519"
+	AlgBase64Ed25519    = "base64+ed25519+v2"
+	AlgAES256GCMEd25519 = "aes-256-gcm+ed25519+v2"
 )
+
+// clockSkewToleranceSeconds is how much clock skew Verify tolerates when
+// checking exp.
+//
+// Deliberately small: the client's clock is under the attacker's control, so a
+// generous allowance is just a free extension on every expired file. This
+// covers ordinary NTP drift and nothing more.
+const clockSkewToleranceSeconds = 60
 
 const (
 	licenseFilePEMHeader = "-----BEGIN LICENSE FILE-----"
@@ -61,9 +75,22 @@ type certPayload struct {
 	Alg string `json:"alg"`
 }
 
-// dataPayload is what enc decodes/decrypts to: {"data": <resource>}.
+// dataPayload is what enc decodes/decrypts to:
+// {"data": <resource>, "meta": <claims>}.
 type dataPayload[T any] struct {
-	Data T `json:"data"`
+	Data T                  `json:"data"`
+	Meta *LicenseFileClaims `json:"meta"`
+}
+
+// LicenseFileClaims are the claims carried inside the signed bytes.
+//
+// These are the point of format v2: unlike the response envelope, they cannot
+// be edited by whoever holds the file.
+type LicenseFileClaims struct {
+	ID        string `json:"jti"`
+	KeyID     string `json:"kid"`
+	IssuedAt  int64  `json:"iat"`
+	ExpiresAt int64  `json:"exp"`
 }
 
 // licenseFileResourceAttrs is the license-files JSON:API resource
@@ -176,7 +203,8 @@ func stripPEM(pem, header, footer string) (string, error) {
 // LicensePayload is the {"data": License} payload a verified LicenseFile
 // decodes to.
 type LicensePayload struct {
-	Data License
+	Claims LicenseFileClaims
+	Data   License
 }
 
 // Verify orchestrates the full verify -> decrypt -> parse pipeline for an
@@ -224,7 +252,10 @@ func (f *LicenseFile) Verify(pub ed25519.PublicKey, licenseKey string) (*License
 		if licenseKey == "" {
 			return nil, ErrLicenseKeyRequired
 		}
-		key := internalcrypto.DeriveLicenseFileKey(licenseKey)
+		key, kerr := internalcrypto.DeriveLicenseFileKey(licenseKey)
+		if kerr != nil {
+			return nil, kerr
+		}
 		const nonceSize = 12
 		const tagSize = 16
 		if len(encBytes) < nonceSize+tagSize {
@@ -243,7 +274,55 @@ func (f *LicenseFile) Verify(pub ed25519.PublicKey, licenseKey string) (*License
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return nil, fmt.Errorf("tamga: invalid JSON in decoded license file payload: %w", err)
 	}
-	return &LicensePayload{Data: payload.Data}, nil
+
+	// Second line behind the Alg gate: a file must not reach the expiry check
+	// with nothing to check.
+	if payload.Meta == nil {
+		return nil, ErrMissingClaims
+	}
+
+	// The signature proves the file is authentic. It does not prove it is still
+	// valid — that is this check, and skipping it is what made v1 files
+	// permanent.
+	if payload.Meta.ExpiresAt != 0 {
+		if f.now()-clockSkewToleranceSeconds > payload.Meta.ExpiresAt {
+			return nil, &ExpiredError{ExpiresAt: payload.Meta.ExpiresAt}
+		}
+	}
+
+	return &LicensePayload{Data: payload.Data, Claims: *payload.Meta}, nil
+}
+
+// now returns the current Unix timestamp, or the injected one.
+//
+// Overridable so tests are deterministic, and so an application that keeps a
+// server-supplied timestamp — the recommended defence against a user winding
+// the system clock back to revive an expired file — can pass that instead of
+// trusting the local clock.
+func (f *LicenseFile) now() int64 {
+	if f.Now != nil {
+		return f.Now()
+	}
+	return time.Now().Unix()
+}
+
+// ErrMissingClaims is returned when a license file's payload has no signed
+// meta claims — i.e. it is a pre-v2 file.
+var ErrMissingClaims = errors.New("tamga: license file payload is missing the signed meta claims (pre-v2 file)")
+
+// ExpiredError is returned when a license file's signature verified but its
+// signed exp claim has passed.
+//
+// Its own type on purpose: a caller that cannot tell "expired" from "forged"
+// either warns the user about tampering when their trial merely ended, or
+// treats a forgery as a renewal prompt.
+type ExpiredError struct {
+	// ExpiresAt is the exp claim, seconds since the Unix epoch.
+	ExpiresAt int64
+}
+
+func (e *ExpiredError) Error() string {
+	return fmt.Sprintf("tamga: license file expired at unix timestamp %d", e.ExpiresAt)
 }
 
 // ErrInvalidSignature is returned by (*LicenseFile).Verify and

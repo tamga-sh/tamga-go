@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // defaultBaseURL is the production Tamga API host, matching the example
@@ -30,6 +33,7 @@ type Client struct {
 	baseURL      string
 	apiVersion   string
 	otp          string
+	maxRetries   int
 	entCacheOnce sync.Once
 }
 
@@ -101,6 +105,7 @@ func New(accountID string, opts ...Option) (*Client, error) {
 		baseURL:    defaultBaseURL,
 		httpClient: http.DefaultClient,
 		apiVersion: DefaultAPIVersion,
+		maxRetries: DefaultMaxRetries,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -115,6 +120,26 @@ func New(accountID string, opts ...Option) (*Client, error) {
 // request/response in this package, except quick-validate's flat-JSON
 // special case (docs/sdk.md §1).
 const contentTypeJSONAPI = "application/vnd.api+json"
+
+// DefaultMaxRetries is how many times a rate-limited (429) request is retried
+// before giving up.
+//
+// Three rides out a short burst without turning a sustained 429 into a request
+// that hangs for minutes.
+const DefaultMaxRetries = 3
+
+// WithMaxRetries overrides how many times a rate-limited request is retried.
+//
+// Pass 0 to handle 429 yourself — the returned *APIError still reports the
+// status, and the server's Retry-After is available on the response.
+func WithMaxRetries(n int) Option {
+	return func(c *Client) {
+		if n < 0 {
+			n = 0
+		}
+		c.maxRetries = n
+	}
+}
 
 // buildURL joins the configured base URL, the required
 // /v1/accounts/{account_id} prefix, and path into a full request URL.
@@ -172,12 +197,125 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 // do sends req and returns the raw *http.Response for the caller to
 // decode — network/transport-level failures (not HTTP-status failures)
 // are returned as an error here.
+//
+// A 429 is retried transparently while the request is safe to repeat and the
+// budget allows. Credential-accepting endpoints run on a tight per-IP budget
+// (5 req/s by default) and the calls a licensing client makes on a timer —
+// validate, heartbeat ping, check-in — are exactly the ones inside it, so
+// without backoff one throttled request becomes a sustained burst that keeps
+// the bucket empty and the client never recovers on its own.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("tamga: request failed: %w", err)
+	retryable := isRetryable(req.Method, req.URL.Path)
+
+	// Buffer the body once so the request can actually be replayed; an
+	// io.Reader is consumed by the first attempt.
+	var body []byte
+	if req.Body != nil && req.GetBody != nil {
+		rc, err := req.GetBody()
+		if err == nil {
+			body, _ = io.ReadAll(rc)
+			_ = rc.Close()
+		}
 	}
-	return resp, nil
+
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 && body != nil {
+			req.Body = io.NopCloser(bytes.NewReader(body))
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("tamga: request failed: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusTooManyRequests || !retryable || attempt >= c.maxRetries {
+			return resp, nil
+		}
+
+		secs, ok := parseRetryAfter(resp)
+		delay := retryDelay(attempt, secs, ok)
+		// The response is being discarded, so its body must be drained and
+		// closed or the connection cannot be reused.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(delay):
+		}
+	}
+}
+
+// retryablePOSTSuffixes are the POST paths safe to repeat after a 429.
+//
+// They are effectively idempotent (validate, check in/out, ping a heartbeat)
+// and they are precisely the calls a client makes on a timer. Creates are
+// deliberately absent: retrying POST /machines risks a second activation
+// burning a second seat, and only the caller knows whether that is acceptable.
+var retryablePOSTSuffixes = []string{
+	"/actions/validate",
+	"/actions/validate-key",
+	"/actions/check-in",
+	"/actions/check-out",
+	"/actions/ping",
+}
+
+func isRetryable(method, path string) bool {
+	if method == http.MethodGet {
+		return true
+	}
+	if method != http.MethodPost {
+		return false
+	}
+	for _, suffix := range retryablePOSTSuffixes {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRetryAfter reads Retry-After as delta-seconds.
+//
+// The HTTP-date form is ignored deliberately: the server sends seconds, and
+// misreading a date as a duration would be far worse than falling back to the
+// client's own backoff.
+func parseRetryAfter(resp *http.Response) (int, bool) {
+	raw := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if raw == "" {
+		return 0, false
+	}
+	secs, err := strconv.Atoi(raw)
+	if err != nil || secs < 0 {
+		return 0, false
+	}
+	return secs, true
+}
+
+// retryDelay is how long to wait before retry number attempt (0-based).
+//
+// Prefers the server's Retry-After — it knows when the bucket refills, and
+// guessing wastes the budget — but caps it, so a misconfigured or hostile
+// proxy cannot park the caller for an hour on one header. Otherwise
+// exponential backoff with jitter, because a fleet that all retries on the
+// same schedule reconverges into the spike it was backing off from.
+func retryDelay(attempt int, retryAfter int, hasRetryAfter bool) time.Duration {
+	if hasRetryAfter {
+		if retryAfter > 60 {
+			retryAfter = 60
+		}
+		return time.Duration(retryAfter) * time.Second
+	}
+	shift := attempt
+	if shift > 5 {
+		shift = 5
+	}
+	base := time.Duration(1<<uint(shift)) * time.Second
+	//nolint:gosec // jitter only needs to break synchronization across a
+	// retrying fleet, not resist prediction — math/rand is the right tool
+	// here, crypto/rand would be paying an unnecessary syscall per retry.
+	return base + time.Duration(rand.Int63n(int64(time.Second)))
 }
 
 // mapError reads a non-2xx response body as a JSON:API error document and

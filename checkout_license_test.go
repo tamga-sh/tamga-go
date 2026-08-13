@@ -33,7 +33,7 @@ func testEd25519Keypair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 }
 
 func representativeLicensePayloadJSON() string {
-	return `{"data":{"id":"lic-id","type":"licenses","attributes":{"name":"Acme Corp","key":"lic-abc123","status":"ACTIVE","expiry":null,"suspended":false,"protected":false,"uses":0,"scheme":null,"encrypted":false,"strict":false,"floating":false,"max_machines":null,"max_uses":null,"max_users":null,"last_validated_at":null,"last_check_in_at":null,"last_check_out_at":null,"machines_count":0,"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}}`
+	return `{"data":{"id":"lic-id","type":"licenses","attributes":{"name":"Acme Corp","key":"lic-abc123","status":"ACTIVE","expiry":null,"suspended":false,"protected":false,"uses":0,"scheme":null,"encrypted":false,"strict":false,"floating":false,"max_machines":null,"max_uses":null,"max_users":null,"last_validated_at":null,"last_check_in_at":null,"last_check_out_at":null,"machines_count":0,"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}},"meta":{"iat":1767225600,"jti":"test-jti","kid":"test-kid"}}`
 }
 
 // buildLicensePEM builds a .lic PEM exactly the way the real server does
@@ -185,7 +185,7 @@ func TestLicenseFileVerify_EncryptedVariantAcrossLicenseKeyLengths(t *testing.T)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pub, priv := testEd25519Keypair(t)
-			key := internalcrypto.DeriveLicenseFileKey(tt.licenseKey)
+			key, _ := internalcrypto.DeriveLicenseFileKey(tt.licenseKey)
 			pem := buildLicensePEM(t, representativeLicensePayloadJSON(), priv, &key, false)
 			file, err := ParseLicenseFile(pem)
 			if err != nil {
@@ -264,7 +264,7 @@ func TestLicenseFileVerify_RejectsTamperedSignature(t *testing.T) {
 func TestLicenseFileVerify_RejectsTamperedCiphertext(t *testing.T) {
 	pub, priv := testEd25519Keypair(t)
 	licenseKey := "lic-abc123"
-	key := internalcrypto.DeriveLicenseFileKey(licenseKey)
+	key, _ := internalcrypto.DeriveLicenseFileKey(licenseKey)
 
 	nonce := make([]byte, 12)
 	for i := range nonce {
@@ -302,7 +302,7 @@ func TestLicenseFileVerify_RejectsTamperedCiphertext(t *testing.T) {
 
 func TestLicenseFileVerify_MissingLicenseKeyForEncryptedFile(t *testing.T) {
 	pub, priv := testEd25519Keypair(t)
-	key := internalcrypto.DeriveLicenseFileKey("lic-abc123")
+	key, _ := internalcrypto.DeriveLicenseFileKey("lic-abc123")
 	pem := buildLicensePEM(t, representativeLicensePayloadJSON(), priv, &key, false)
 	file, err := ParseLicenseFile(pem)
 	if err != nil {
@@ -356,7 +356,7 @@ func TestCheckOutLicense_POSTVariantReturnsLicenseFilesResource(t *testing.T) {
 			t.Fatalf("ReadFile() error = %v", err)
 		}
 		w.Header().Set("Content-Type", "application/vnd.api+json")
-		resp := fmt.Sprintf(`{"data":{"id":"cert-id","type":"license-files","attributes":{"certificate":%q,"algorithm":"base64+ed25519","includes":[],"ttl":3600,"expiry":"2026-02-01T00:00:00Z","issued":"2026-01-01T00:00:00Z"}}}`, string(pemBytes))
+		resp := fmt.Sprintf(`{"data":{"id":"cert-id","type":"license-files","attributes":{"certificate":%q,"algorithm":"base64+ed25519+v2","includes":[],"ttl":3600,"expiry":"2026-02-01T00:00:00Z","issued":"2026-01-01T00:00:00Z"}}}`, string(pemBytes))
 		_, _ = w.Write([]byte(resp))
 	})
 	defer closeFn()
