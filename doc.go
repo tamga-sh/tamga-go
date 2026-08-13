@@ -2,7 +2,7 @@
 // offline (air-gapped) verification, and machine fleet management for
 // license-embedded Go applications.
 //
-// Import path: github.com/tamga-sh/tamga-go/v2 — the module path is the
+// Import path: github.com/tamga-sh/tamga-go — the module path is the
 // package's import path, with no pkg/ nesting. This mirrors keygen-go
 // rather than layouts that hide the public API behind an internal pkg/
 // directory (see docs/plans/tamga-go.plan.md §2 Architecture).

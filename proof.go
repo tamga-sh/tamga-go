@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	internalcrypto "github.com/tamga-sh/tamga-go/v2/internal/crypto"
+	internalcrypto "github.com/tamga-sh/tamga-go/internal/crypto"
 )
 
 // ProofPrefix prefixes every offline proof string this SDK generates or

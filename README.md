@@ -1,7 +1,7 @@
 # tamga-go
 
 [![CI](https://github.com/tamga-sh/tamga-go/actions/workflows/ci.yml/badge.svg)](https://github.com/tamga-sh/tamga-go/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/tamga-sh/tamga-go/v2.svg)](https://pkg.go.dev/github.com/tamga-sh/tamga-go/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tamga-sh/tamga-go.svg)](https://pkg.go.dev/github.com/tamga-sh/tamga-go)
 [![coverage](https://codecov.io/gh/tamga-sh/tamga-go/branch/main/graph/badge.svg)](https://codecov.io/gh/tamga-sh/tamga-go)
 
 Official Go SDK for Tamga. Integrate license activation, offline verification, and machine
@@ -10,10 +10,10 @@ management into your Go applications.
 ## Install
 
 ```bash
-go get github.com/tamga-sh/tamga-go/v2
+go get github.com/tamga-sh/tamga-go
 ```
 
-Package: `github.com/tamga-sh/tamga-go/v2` · Docs: [pkg.go.dev/github.com/tamga-sh/tamga-go/v2](https://pkg.go.dev/github.com/tamga-sh/tamga-go/v2)
+Package: `github.com/tamga-sh/tamga-go` · Docs: [pkg.go.dev/github.com/tamga-sh/tamga-go](https://pkg.go.dev/github.com/tamga-sh/tamga-go)
 · Supported Go versions: 1.22, 1.23.
 
 ## Quickstart
@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/tamga-sh/tamga-go/v2"
+	"github.com/tamga-sh/tamga-go"
 )
 
 func main() {
@@ -94,7 +94,7 @@ verification code:**
 
 ## Documentation
 
-- [pkg.go.dev/github.com/tamga-sh/tamga-go/v2](https://pkg.go.dev/github.com/tamga-sh/tamga-go/v2) —
+- [pkg.go.dev/github.com/tamga-sh/tamga-go](https://pkg.go.dev/github.com/tamga-sh/tamga-go) —
   generated API reference.
 - [`tamga-api`'s `docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md) —
   the authoritative protocol/feature reference this SDK implements against, including the

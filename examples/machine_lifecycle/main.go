@@ -22,7 +22,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/tamga-sh/tamga-go/v2"
+	"github.com/tamga-sh/tamga-go"
 )
 
 func main() {
