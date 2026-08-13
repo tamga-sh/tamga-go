@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/tamga-sh/tamga-go/compare/tamga-go-v1.0.1...tamga-go-v1.1.0) (2026-08-13)
+
+
+### Features
+
+* SDK v2 security contract — license-file HKDF, offline format v2, HTTP 429 handling ([cf9ad3e](https://github.com/tamga-sh/tamga-go/commit/cf9ad3e670240f6dcbcab06f5b0cc63b71f1a055))
+
 ## [1.0.1](https://github.com/tamga-sh/tamga-go/compare/tamga-go-v1.0.0...tamga-go-v1.0.1) (2026-08-12)
 
 
