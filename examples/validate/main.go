@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/tamga-sh/tamga-go"
+	"github.com/tamga-sh/tamga-go/v2"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/tamga-sh/tamga-go
+module github.com/tamga-sh/tamga-go/v2
 
 go 1.22
 

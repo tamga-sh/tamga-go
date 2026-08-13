@@ -21,7 +21,7 @@ import (
 	"os"
 	"testing"
 
-	internalcrypto "github.com/tamga-sh/tamga-go/internal/crypto"
+	internalcrypto "github.com/tamga-sh/tamga-go/v2/internal/crypto"
 )
 
 func representativeMachinePayloadJSON() string {

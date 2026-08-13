@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	internalcrypto "github.com/tamga-sh/tamga-go/internal/crypto"
+	internalcrypto "github.com/tamga-sh/tamga-go/v2/internal/crypto"
 )
 
 // testEd25519Keypair generates a fresh Ed25519 keypair for a single test —

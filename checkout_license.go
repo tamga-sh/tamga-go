@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	internalcrypto "github.com/tamga-sh/tamga-go/internal/crypto"
+	internalcrypto "github.com/tamga-sh/tamga-go/v2/internal/crypto"
 )
 
 // CheckOutOptions configures CheckOutLicense and CheckOutMachine.
