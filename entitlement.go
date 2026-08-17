@@ -172,8 +172,8 @@ func (c *Client) HasEntitlement(ctx context.Context, licenseID, code string) (bo
 
 // InvalidateEntitlementCache drops the cached entitlement list for
 // licenseID, forcing the next HasEntitlement call to refetch regardless of
-// TTL — the explicit invalidation/refresh method backing the in-memory
-// cache described in docs/plans/tamga-go.plan.md Section J.
+// TTL — the explicit invalidation hatch for the in-memory cache
+// HasEntitlement reads from.
 func (c *Client) InvalidateEntitlementCache(licenseID string) {
 	cache := c.entitlementCacheFor()
 	cache.mu.Lock()

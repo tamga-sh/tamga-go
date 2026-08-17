@@ -13,14 +13,9 @@ import (
 // IDs (License.ID, and every other resource/relationship ID in this
 // package) are modeled as plain strings, not a dedicated UUID type: this
 // package's only external dependency is golang.org/x/crypto (for HKDF, see
-// internal/crypto/hkdf.go and CLAUDE.md's "Critical Dependency Notes") —
-// adding google/uuid or a similar package solely to wrap an
-// already-string-shaped wire value would violate that single-dependency
-// design deliberately recorded in this repo's CLAUDE.md and go.mod. This
-// is a documented deviation from docs/plans/tamga-go.plan.md's literal
-// `uuid.UUID` field-type wording in Section C/E/F/etc. — ground truth here
-// is this repo's own scaffolded go.mod/CLAUDE.md, which predates and
-// overrides the plan's abbreviated type sketches.
+// internal/crypto/hkdf.go) — pulling in a UUID package solely to wrap an
+// already-string-shaped wire value would spend that single-dependency
+// budget on nothing.
 type License struct {
 	ID         string            `json:"id"`
 	Type       string            `json:"type"`

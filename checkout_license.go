@@ -210,8 +210,14 @@ type LicensePayload struct {
 // Verify orchestrates the full verify -> decrypt -> parse pipeline for an
 // offline .lic file, using pub (the account's Ed25519 public key) to check
 // the signature. licenseKey is required only for the encrypted
-// (aes-256-gcm+ed25519) variant — pass "" for a plain (base64+ed25519)
-// file.
+// AlgAES256GCMEd25519 variant — pass "" for a plain AlgBase64Ed25519 file.
+//
+// Only format-v2 files are accepted. A payload with no signed meta claims
+// is a pre-v2 file and is rejected with ErrMissingClaims; there is no
+// fallback path. Once the signature passes, the signed exp claim is
+// enforced with a clockSkewToleranceSeconds allowance, returning an
+// *ExpiredError (distinct from ErrInvalidSignature so callers can tell an
+// ended trial from a forgery).
 //
 // Verification order matters and is deliberately fail-closed: the
 // signature is checked BEFORE enc is base64-decoded, decrypted, or parsed

@@ -152,11 +152,11 @@ func isOverageCode(code ValidationCode) bool {
 // On that rollback path, ActivateMachine returns (nil, meta, err) with err
 // matching ErrMachineOverLimit (via errors.Is) — NOT (machine, meta, nil).
 // The machine has already been deleted server-side by the time this
-// returns; a caller that only checked `err == nil` before Section §4's
-// review would have been handed a stale, deleted machine's ID as if
-// activation had succeeded. meta is still populated so callers that want
-// the exact ValidationCode (to decide messaging, retry policy, etc.) can
-// inspect it despite the error.
+// returns, so branching on the returned machine without first checking err
+// would hand you a stale, deleted machine's ID as if activation had
+// succeeded. meta is still populated so callers that want the exact
+// ValidationCode (to decide messaging, retry policy, etc.) can inspect it
+// despite the error.
 //
 // Deletion failures during rollback are not surfaced beyond that — the
 // ErrMachineOverLimit/meta pair is what the caller most needs; a machine
@@ -205,10 +205,10 @@ func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine
 
 // HeartbeatScheduler periodically calls PingHeartbeat for one machine
 // until its context is canceled. The recommended default interval is
-// window/3 (~200s for the hardcoded 600s machine window) — see
-// docs/plans/tamga-go.plan.md Section G. Treat a DEAD status observed from
-// a ping's response as "machine likely deleted server-side — re-activate
-// rather than retry ping," per HeartbeatStatus's doc comment.
+// window/3 (~200s for the hardcoded 600s machine window), available as
+// DefaultHeartbeatInterval. Treat a DEAD status observed from a ping's
+// response as "machine likely deleted server-side — re-activate rather
+// than retry ping," per HeartbeatStatus's doc comment.
 type HeartbeatScheduler struct {
 	client    *Client
 	onTick    func(*Machine, error)
@@ -302,7 +302,7 @@ type CreateComponentOptions struct {
 // POST /v1/accounts/{account_id}/components. Not JSON:API-enveloped on the
 // request side (unlike CreateMachine) — the server's handler expects a
 // flat {machine_id, fingerprint, name, metadata} body; this is a real
-// asymmetry in tamga-api, not an SDK oversight.
+// asymmetry in the server's API, not an SDK oversight.
 //
 // Unique per (account_id, machine_id, fingerprint) — a duplicate fails
 // with an error matching ErrFingerprintTaken (distinct call site from the

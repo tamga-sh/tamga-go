@@ -12,9 +12,8 @@ import "time"
 // Only 14 of the 24 values below are reachable against the current server
 // implementation; the rest are declared for schema completeness and
 // forward-compatibility. Each constant below is marked reachable (✅) or
-// not (⛔) as of the server behavior documented in docs/sdk.md §2 and
-// docs/plans/tamga-go.plan.md Section K — do not build product logic
-// around a ⛔ value returning from a live call today.
+// not (⛔) as of the server behavior documented in docs/sdk.md §2 — do not
+// build product logic around a ⛔ value returning from a live call today.
 type ValidationCode string
 
 const (

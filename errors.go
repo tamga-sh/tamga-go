@@ -32,12 +32,10 @@ type ErrorResponse struct {
 }
 
 // APIError wraps a single Error plus the HTTP status it arrived with and
-// implements the error interface. This type and its Is/As support are
-// scaffolded ahead of client.go's real request execution because nearly
-// every other file in this package references APIError or a sentinel error
-// in its own doc comments (see docs/plans/tamga-go.plan.md Section K); the
-// sentinel error vars themselves (ErrNotFound, ErrFingerprintTaken, etc.)
-// are not declared yet and land with the endpoints that can return them.
+// implements the error interface. Every non-2xx response from this package
+// is mapped to an *APIError; match against the sentinels declared below
+// (ErrNotFound, ErrFingerprintTaken, ...) with errors.Is, which compares on
+// the stable Code rather than the human-readable Detail.
 type APIError struct {
 	Err        Error
 	Response   ResponseInfo

@@ -172,7 +172,13 @@ type MachinePayload struct {
 //
 // licenseKey/fingerprint are required only for an encrypted
 // (aes-256-gcm+...) file — both are needed to re-derive the HKDF key (see
-// internal/crypto/hkdf.go); pass "" for a plain file.
+// internal/crypto/hkdf.go); pass "" for a plain file. Needing the
+// fingerprint is what binds a machine file to one machine: it cannot be
+// opened anywhere else, even with the license key.
+//
+// Unlike a license file, a machine file carries no signed meta claims, so
+// there is no exp for this method to enforce — its lifetime is bounded by
+// the ttl requested at checkout and by that fingerprint binding.
 //
 // ⚠️ SchemeRSA2048JWTRS256 is rejected up front — before any parsing or
 // crypto primitive is invoked — with an error matching ErrSchemeNotSupported,
