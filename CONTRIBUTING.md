@@ -36,11 +36,10 @@ See the [`justfile`](justfile) for exact recipe contents.
   authoritative, not `just check` alone, if the two ever disagree.
 - Sections implementing checkout or offline-proof cryptography
   ([`checkout_license.go`](checkout_license.go), [`checkout_machine.go`](checkout_machine.go),
-  [`proof.go`](proof.go), and everything under `internal/crypto/`) require a `security-reviewer`
-  pass before merge — see [`docs/plans/tamga-go.plan.md`](docs/plans/tamga-go.plan.md) §4. This
-  is stricter than a typical review: for these files, a HIGH-severity finding blocks merge, not
-  just a CRITICAL one, because a subtly wrong verifier fails silently (it accepts a forged file)
-  rather than loudly.
+  [`proof.go`](proof.go), and everything under `internal/crypto/`) require a dedicated security
+  review before merge — see [`SECURITY.md`](SECURITY.md). This is stricter than a typical review:
+  for these files, a HIGH-severity finding blocks merge, not just a CRITICAL one, because a
+  subtly wrong verifier fails silently (it accepts a forged file) rather than loudly.
 - New table-driven tests are expected alongside any new exported behavior — this repo follows
   TDD (red/green/refactor); see `ecc:golang-testing` conventions.
 

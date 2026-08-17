@@ -105,10 +105,13 @@ var (
 	ErrDatasetInvalid      = &APIError{HTTPStatus: 422, Err: Error{Code: "DATASET_INVALID"}}
 )
 
-// NOTE: 429 TOO_MANY_REQUESTS is declared in the server's error enum but has
-// no constructor and is never returned by any code path today (docs/sdk.md
-// "Known Server-Side Gaps" #5) — deliberately not modeled as a sentinel
-// here; do not build client-side 429/backoff handling against it.
+// NOTE: 429 TOO_MANY_REQUESTS is live and handled in the transport layer, not
+// modeled as a sentinel here. (*Client).do (client.go) retries a throttled
+// request transparently — capped Retry-After, otherwise jittered exponential
+// backoff — for GET plus the five safe POST actions listed in
+// retryablePOSTSuffixes. Only once the retry budget (WithMaxRetries,
+// default DefaultMaxRetries) is exhausted does the 429 surface to the caller,
+// as an ordinary *APIError with HTTPStatus 429.
 
 // Local (client-side, non-API) verification errors returned by
 // (*LicenseFile).Verify and (*MachineFile).Verify — distinct from the

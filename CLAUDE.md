@@ -6,27 +6,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `tamga-go` is the official Go SDK for Tamga (license activation, offline verification, machine
 fleet management). Single module, flat top-level `tamga` package — import path equals module
-path (`github.com/tamga-sh/tamga-go`, no `pkg/` nesting), matching `keygen-go` convention. Full
-task breakdown: [`../docs/plans/tamga-go.plan.md`](../docs/plans/tamga-go.plan.md) (lives one directory up, in the sibling `tamga-sdk` monorepo, not inside this repo). Protocol source of
-truth: [`tamga-api`'s `docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md)
-— every field name, endpoint path, and enum value in this SDK is transcribed from that file, not
-paraphrased from `docs/plans/` in the server repo (where the two disagree, `sdk.md` reflects
-actual runtime behavior and wins).
+path (`github.com/tamga-sh/tamga-go`, no `pkg/` nesting). The protocol source of truth is the
+Tamga API server's own SDK protocol reference (`docs/sdk.md` in the server repo, which is
+private) — every field name, endpoint path, and enum value in this SDK is transcribed from that
+file, not paraphrased. Where it disagrees with anything else, it reflects actual runtime
+behavior and wins.
 
-**Current state: all sections (A–M) implemented, tested, and committed** — client/transport,
-license validate/check-in, machine/component/process management + heartbeats, entitlements, error
-model, policy enums, license/machine checkout crypto, offline proof, docs/examples, and CI/release
-automation. Every mandatory `security-reviewer` gate (Sections E/F/H) passed with zero
-CRITICAL/HIGH findings after fixes; a non-mandatory `ecc:go-review` pass across the remaining
-sections also found and fixed 3 HIGH/5 MEDIUM/2 LOW issues (path/query injection via unescaped
-sub-resource IDs, an `ActivateMachine` bug that returned success after a rollback delete, and an
-unreachable heartbeat-scheduler callback, among others). See
-`../docs/plans/tamga-go.plan.md` for the full checkbox state (100%) and every deviation from the
-plan's literal wording, documented inline at each section.
+**Current state: feature-complete and released (latest: `v1.2.0`).** Client/transport, license
+validate/check-in, machine/component/process management + heartbeats, entitlements, error model,
+policy enums, license/machine checkout crypto, offline proof, HTTP 429 retry/backoff,
+docs/examples, and CI/release automation are all implemented and tested.
 
 Resource/relationship IDs are plain Go `string`s throughout, not a dedicated UUID type — see
-`license.go`'s `License` doc comment and the deviation note at the top of the plan's Section B for
-why (this repo's single-external-dependency constraint on `golang.org/x/crypto`).
+`license.go`'s `License` doc comment for why (this repo's single-external-dependency constraint
+on `golang.org/x/crypto`).
 
 ## Architecture
 
@@ -34,23 +27,23 @@ why (this repo's single-external-dependency constraint on `golang.org/x/crypto`)
 tamga-go/
 ├── go.mod                     # module github.com/tamga-sh/tamga-go, go 1.22
 ├── go.sum
-├── doc.go                     # package doc comment + file map
-├── client.go                  # Client struct, functional options, execute()      [stub]
-├── transport.go                # AuthTransport + 5 concrete transports            [stub]
-├── license.go                  # License resource, Validate*/CheckIn, Scope       [stub]
-├── machine.go                  # Machine/Component/Process CRUD + heartbeats      [stub]
-├── validation.go               # ValidationCode string enum (24 values)          [seeded]
-├── entitlement.go               # Entitlement resource, HasEntitlement + cache    [stub]
-├── policy.go                    # LicenseScheme/OverageStrategy/heartbeat enums   [stub]
-├── checkout_license.go          # .lic parse/verify — Ed25519 + naive AES key     [stub]
-├── checkout_machine.go          # .machine parse/verify — multi-scheme + HKDF     [stub]
-├── proof.go                     # offline proof generate/verify — byte-exact RSA  [stub]
-├── errors.go                    # JSON:API Error/ErrorResponse, APIError Is/As    [seeded]
+├── doc.go                      # package doc comment + file map
+├── client.go                   # Client struct, functional options, 429 retry/backoff
+├── transport.go                # AuthTransport + 5 concrete transports
+├── license.go                  # License resource, Validate*/CheckIn, Scope
+├── machine.go                  # Machine/Component/Process CRUD + heartbeats
+├── validation.go               # ValidationCode string enum (24 values)
+├── entitlement.go              # Entitlement resource, HasEntitlement + cache
+├── policy.go                   # LicenseScheme/OverageStrategy/heartbeat enums
+├── checkout_license.go         # .lic parse/verify — Ed25519 + HKDF AES key, format v2
+├── checkout_machine.go         # .machine parse/verify — multi-scheme + HKDF
+├── proof.go                    # offline proof generate/verify — byte-exact RSA
+├── errors.go                   # JSON:API Error/ErrorResponse, APIError Is/As
 │
-├── internal/crypto/             # not importable outside this module
-│   ├── ed25519.go, rsa.go, ecdsa.go, aesgcm.go   # stdlib wrappers               [stub]
-│   ├── hkdf.go                                    # golang.org/x/crypto/hkdf wrapper [stub]
-│   └── naivekey.go                                # zero-pad/truncate transform, NOT a KDF [stub]
+├── internal/crypto/            # not importable outside this module
+│   ├── ed25519.go, rsa.go, ecdsa.go, aesgcm.go   # stdlib wrappers
+│   └── hkdf.go                                   # golang.org/x/crypto/hkdf wrapper —
+│                                                 # both license- and machine-file keys
 │
 ├── *_test.go                    # co-located per Go convention, one per root file
 ├── internal/crypto/*_test.go
@@ -95,9 +88,14 @@ analytics, EE gating) and don't apply to any SDK.
   joins a table that doesn't exist and 500s on every real call; even once fixed server-side, it
   returns no download URL, so a second endpoint would still be needed and doesn't exist. This is
   a hard non-goal for v1, not a "coming soon" stub — don't scaffold a `releases.go` for it.
-- **Do not build client-side 429/backoff handling.** `429 TOO_MANY_REQUESTS` is declared in the
-  server's error enum but has no constructor and is never returned by any code path today.
-  Backoff logic against a status the server structurally cannot send is dead code from day one.
+- **429 handling already ships — extend it, don't re-invent it.** `client.go`'s `do()` retries a
+  throttled request transparently: `parseRetryAfter` reads `Retry-After` as delta-seconds,
+  `retryDelay` caps it at 60s and otherwise falls back to jittered exponential backoff, and
+  `isRetryable` scopes auto-retry to `GET` plus the five safe `POST` actions in
+  `retryablePOSTSuffixes` (`validate`, `validate-key`, `check-in`, `check-out`, `ping`). Creates
+  are deliberately excluded — retrying `POST /machines` can burn a second seat. Budget is
+  `DefaultMaxRetries` (3), overridable with `WithMaxRetries`; `0` hands the `*APIError` straight
+  back to the caller.
 - **Model all 24 `ValidationCode` values, but only 14 are reachable today** (`validation.go`
   already encodes this — see its doc comment for the exact split). Do not write example code or
   documentation implying `BANNED`, `ENTITLEMENTS_MISSING`, `HEARTBEAT_DEAD`, or the other ⛔
@@ -126,9 +124,9 @@ analytics, EE gating) and don't apply to any SDK.
 **stdlib covers every cryptographic scheme this SDK verifies except HKDF.** `crypto/ed25519`,
 `crypto/rsa`, `crypto/ecdsa`, and `crypto/cipher`+`crypto/aes` are all sufficient for the
 Ed25519/RSA-PKCS1/RSA-PSS/ECDSA-P256/AES-256-GCM surface in `checkout_license.go`,
-`checkout_machine.go`, and `proof.go`. Only HKDF (machine-file key derivation) has no stdlib
-implementation — `golang.org/x/crypto/hkdf` is this module's **one and only** external
-dependency. Do not add a second dependency for a primitive stdlib already covers; if a future
+`checkout_machine.go`, and `proof.go`. Only HKDF — which derives *both* the license-file and the
+machine-file AES key (`internal/crypto/hkdf.go`) — has no stdlib implementation, so
+`golang.org/x/crypto/hkdf` is this module's **one and only** external dependency. Do not add a second dependency for a primitive stdlib already covers; if a future
 change seems to need one, that's a signal to re-check whether stdlib already has it under a
 name that isn't obvious (e.g. `crypto/subtle` for constant-time comparisons).
 
