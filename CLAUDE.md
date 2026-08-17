@@ -80,9 +80,9 @@ against (and in tests, an `httptest.Server`).
 
 ## GOTCHAS
 
-Pulled from `docs/sdk.md`'s "Known Server-Side Gaps" section — only the items that actually
-constrain this repo's scope are listed; several gaps there are `tamga-api`-internal (ClickHouse
-analytics, EE gating) and don't apply to any SDK.
+Pulled from the server protocol reference's "Known Server-Side Gaps" section — only the items
+that actually constrain this repo's scope are listed; several gaps there are server-internal
+(analytics storage, edition gating) and don't apply to any SDK.
 
 - **Do not build the auto-update/release-checking feature.** `GET /releases/actions/upgrade`
   joins a table that doesn't exist and 500s on every real call; even once fixed server-side, it
