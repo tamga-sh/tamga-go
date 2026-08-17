@@ -7,7 +7,7 @@ import (
 
 // AuthTransport applies one authentication scheme to an outgoing request —
 // either a header or a query parameter, matching the server's try-order
-// documented in docs/sdk.md §1:
+// documented in the Tamga API protocol specification §1:
 //
 //  1. Authorization: Bearer <token>
 //  2. Authorization: Basic <base64>  — 3 sub-forms: email:password,

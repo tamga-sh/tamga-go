@@ -6,8 +6,9 @@ import "errors"
 //
 //	{"errors": [{id, status, code, title, detail, source: {pointer}}]}
 //
-// See docs/sdk.md §11. code is stable and should drive matching logic;
-// detail is human text and may change between server versions.
+// See the Tamga API protocol specification §11. code is stable and should
+// drive matching logic; detail is human text and may change between server
+// versions.
 type Error struct {
 	Source *ErrorSource `json:"source,omitempty"`
 	ID     string       `json:"id,omitempty"`
@@ -52,8 +53,9 @@ func (e *APIError) Error() string {
 
 // Is reports whether target is an *APIError with the same Code, so that
 // errors.Is(err, someSentinel) works regardless of wrapping. Matching is
-// deliberately on Code (stable, per docs/sdk.md §11) and never on Detail
-// (human text, may change between server versions).
+// deliberately on Code (stable, per the Tamga API protocol specification
+// §11) and never on Detail (human text, may change between server
+// versions).
 func (e *APIError) Is(target error) bool {
 	var t *APIError
 	if !errors.As(target, &t) || t == nil {
@@ -73,9 +75,10 @@ func (e *APIError) As(target any) bool {
 	return true
 }
 
-// Sentinel errors, fixed-status codes (docs/sdk.md §11). Match against
-// these with errors.Is; a real *APIError always carries the server's own
-// Detail/HTTPStatus, these sentinels only pin the stable Code.
+// Sentinel errors, fixed-status codes (Tamga API protocol specification
+// §11). Match against these with errors.Is; a real *APIError always
+// carries the server's own Detail/HTTPStatus, these sentinels only pin the
+// stable Code.
 //
 // ⚠️ Treat every sentinel below as read-only. APIError's fields (Err,
 // HTTPStatus, Response) are exported so this package can populate a fresh

@@ -287,7 +287,7 @@ func TestVerifyOfflineProof_MalformedPrefixRejectedBeforeAnyCrypto(t *testing.T)
 // --- Regression tests added after security review found a second,
 // separate byte-exactness gap: Go's encoding/json HTML-escapes
 // '<'/'>'/'&' and unconditionally escapes U+2028/U+2029, neither of which
-// tamga-api's pinned serde_json does by default. See
+// the Tamga API server's pinned serde_json does by default. See
 // buildOfflineProofPayloadJSON's and serdeCompatMarshal's doc comments.
 
 // lineSeparator/paragraphSeparator are built from integer code points

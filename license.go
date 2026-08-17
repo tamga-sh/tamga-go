@@ -6,9 +6,10 @@ import (
 	"fmt"
 )
 
-// License is the `licenses` JSON:API resource (docs/sdk.md §2). Field set
-// matches the server's actual LicenseResource/LicenseAttributes serializer
-// — notably, no `relationships` object exists on this resource today.
+// License is the `licenses` JSON:API resource (Tamga API protocol
+// specification §2). Field set matches the server's actual
+// LicenseResource/LicenseAttributes serializer — notably, no
+// `relationships` object exists on this resource today.
 //
 // IDs (License.ID, and every other resource/relationship ID in this
 // package) are modeled as plain strings, not a dedicated UUID type: this
@@ -53,8 +54,9 @@ type LicenseAttributes struct {
 //
 // Only Product/Policy/User/Environment are actually enforced server-side
 // today; Entitlements/Fingerprint/Version/Checksum are parsed but silently
-// ignored (docs/sdk.md §2). Model them here for forward-compatibility, but
-// never advertise them as functioning constraints.
+// ignored (Tamga API protocol specification §2). Model them here for
+// forward-compatibility, but never advertise them as functioning
+// constraints.
 type Scope struct {
 	Product      *string  `json:"product,omitempty"`
 	Policy       *string  `json:"policy,omitempty"`
@@ -119,7 +121,8 @@ func (c *Client) ValidateByID(ctx context.Context, licenseID string, opts *Valid
 //
 // Unlike every other endpoint in this package, the response is plain
 // application/json with a flat {ts, valid, detail, code} body — no "data"
-// envelope (docs/sdk.md §1/§2) — decodeFlat implements that special case.
+// envelope (Tamga API protocol specification §1/§2) — decodeFlat
+// implements that special case.
 func (c *Client) QuickValidate(ctx context.Context, licenseID string) (*ValidationMeta, error) {
 	path := fmt.Sprintf("/licenses/%s/actions/validate", escapePathSegment(licenseID))
 	meta, err := decodeFlat[ValidationMeta](ctx, c, "GET", path)

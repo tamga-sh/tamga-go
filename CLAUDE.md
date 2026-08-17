@@ -7,10 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `tamga-go` is the official Go SDK for Tamga (license activation, offline verification, machine
 fleet management). Single module, flat top-level `tamga` package — import path equals module
 path (`github.com/tamga-sh/tamga-go`, no `pkg/` nesting). The protocol source of truth is the
-Tamga API server's own SDK protocol reference (`docs/sdk.md` in the server repo, which is
-private) — every field name, endpoint path, and enum value in this SDK is transcribed from that
-file, not paraphrased. Where it disagrees with anything else, it reflects actual runtime
-behavior and wins.
+Tamga API protocol specification — every field name, endpoint path, and enum value in this SDK
+is transcribed from it, not paraphrased. Where it disagrees with anything else, it reflects
+actual runtime behavior and wins.
 
 **Current state: feature-complete and released (latest: `v1.2.0`).** Client/transport, license
 validate/check-in, machine/component/process management + heartbeats, entitlements, error model,
@@ -80,9 +79,9 @@ against (and in tests, an `httptest.Server`).
 
 ## GOTCHAS
 
-Pulled from the server protocol reference's "Known Server-Side Gaps" section — only the items
-that actually constrain this repo's scope are listed; several gaps there are server-internal
-(analytics storage, edition gating) and don't apply to any SDK.
+Pulled from the Tamga API protocol specification's "Known Server-Side Gaps" section — only the
+items that actually constrain this repo's scope are listed; several gaps there are
+server-internal (analytics storage, edition gating) and don't apply to any SDK.
 
 - **Do not build the auto-update/release-checking feature.** `GET /releases/actions/upgrade`
   joins a table that doesn't exist and 500s on every real call; even once fixed server-side, it
@@ -160,7 +159,7 @@ committing to it, the way this file's own note on `golang.org/x/crypto` pinning 
   — RED/GREEN/REFACTOR, write the test before the implementation).
 - `checkout_license_test.go`, `checkout_machine_test.go`, and `proof_test.go` each carry a
   **negative regression test that is more important than its happy-path counterpart**: a test
-  that deliberately reintroduces the section's central bug (signing over decoded bytes instead
+  that deliberately reintroduces that file's central bug (signing over decoded bytes instead
   of the base64 string; accepting `RSA_2048_JWT_RS256`; reconstructing the offline-proof JSON
   with a different field order) and asserts `Verify()` still rejects it. A green test suite that
   is missing these regression cases has not actually proven the verifier is correct — a

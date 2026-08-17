@@ -47,8 +47,7 @@ func TestWithBaseURL_TrimsTrailingSlash(t *testing.T) {
 
 // TestAuthTransportTable is a table-driven test per auth transport
 // (Bearer / Basic x3 sub-forms / License / Cookie / query param) asserting
-// exact header/query wire format on an outgoing request, per
-// docs/plans/tamga-go.plan.md Section B.
+// exact header/query wire format on an outgoing request.
 func TestAuthTransportTable(t *testing.T) {
 	tests := []struct {
 		name       string

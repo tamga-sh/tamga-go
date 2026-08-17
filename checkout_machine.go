@@ -23,11 +23,11 @@ const (
 )
 
 // maxCheckoutTTLSeconds is the server-validated upper bound for a checkout
-// TTL — 365 days (docs/sdk.md §6). Both license and machine checkout
-// accept a ttl param, but only machine checkout validates it server-side;
-// this SDK pre-checks it client-side only for CheckOutMachine, mirroring
-// that asymmetry rather than inventing a client-side check the server
-// itself doesn't enforce for license checkout.
+// TTL — 365 days (Tamga API protocol specification §6). Both license and
+// machine checkout accept a ttl param, but only machine checkout validates
+// it server-side; this SDK pre-checks it client-side only for
+// CheckOutMachine, mirroring that asymmetry rather than inventing a
+// client-side check the server itself doesn't enforce for license checkout.
 const maxCheckoutTTLSeconds = 365 * 24 * 3600
 
 // checkTTL mirrors the server's validated ttl range for machine checkout

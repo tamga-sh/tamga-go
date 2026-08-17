@@ -28,7 +28,7 @@ import (
 )
 
 // machineFileKeySalt is the fixed HKDF salt for machine-file key
-// derivation (docs/sdk.md §6).
+// derivation (Tamga API protocol specification §6).
 const machineFileKeySalt = "tamga:machine-file-key-v1"
 
 // licenseFileKeySalt and licenseFileKeyInfo are the fixed HKDF parameters for

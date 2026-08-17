@@ -1,6 +1,6 @@
 // Command checkin demonstrates the check-in flow, gated on the license's
 // policy require_check_in field rather than blindly retrying on
-// CHECK_IN_NOT_REQUIRED (docs/sdk.md §3).
+// CHECK_IN_NOT_REQUIRED (Tamga API protocol specification §3).
 //
 // Run:
 //

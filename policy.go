@@ -1,6 +1,7 @@
 // Package tamga — policy.go holds the policy-derived enums and the partial
 // Policy resource a validating client needs to interpret a license's
-// behavior, not just its ValidationCode (docs/sdk.md §10).
+// behavior, not just its ValidationCode (Tamga API protocol specification
+// §10).
 package tamga
 
 import "encoding/json"
@@ -15,7 +16,7 @@ type LicenseScheme string
 
 const (
 	// SchemeEd25519Sign is Ed25519. The machine-file default when a
-	// license has no scheme set (docs/sdk.md §10).
+	// license has no scheme set (Tamga API protocol specification §10).
 	SchemeEd25519Sign LicenseScheme = "ED25519_SIGN"
 	// SchemeRSA2048PKCS1Sign is RSA-2048 PKCS#1 v1.5 / SHA-256.
 	SchemeRSA2048PKCS1Sign LicenseScheme = "RSA_2048_PKCS1_SIGN"
@@ -116,7 +117,7 @@ const (
 // literal string match rather than a closed enum — an unrecognized value
 // is not a decode error (it's just a string) since the server itself
 // doesn't validate against a fixed set either. Treat any value outside the
-// named constants as "deny/default" (docs/sdk.md §10).
+// named constants as "deny/default" (Tamga API protocol specification §10).
 type ExpirationStrategy string
 
 // Named ExpirationStrategy values the server documents — see
@@ -151,9 +152,9 @@ const (
 )
 
 // Policy is the partial `policies` JSON:API resource attribute set this SDK
-// models (docs/sdk.md §10). ⚠️ The GET response omits max_memory and
-// max_disk even though both are enforced during validation — this SDK
-// cannot introspect those two limits client-side, only observe
+// models (Tamga API protocol specification §10). ⚠️ The GET response omits
+// max_memory and max_disk even though both are enforced during validation
+// — this SDK cannot introspect those two limits client-side, only observe
 // TOO_MUCH_MEMORY/TOO_MUCH_DISK if validation fails, so neither field is
 // modeled here at all (not merely left nil).
 type Policy struct {
@@ -169,12 +170,12 @@ type Policy struct {
 // OverageStrategyRaw, HeartbeatResurrectionStrategyRaw) rather than the
 // typed enums above: freshly-created policies default overage_strategy to
 // the non-existent string "DENY_ACCESS" and heartbeat_resurrection_strategy
-// to the non-existent string "NO_RESURRECTION" (docs/sdk.md's Known
-// Server-Side Gaps #9) — decoding straight into the typed enum would still
-// technically succeed (Go string-backed types accept any string), but
-// callers reading the raw field and comparing it against the OverageNone/
-// HeartbeatResurrectionNone constants directly would get a false "not
-// equal" without calling EffectiveOverageStrategy/
+// to the non-existent string "NO_RESURRECTION" (the Tamga API protocol
+// specification's Known Server-Side Gaps #9) — decoding straight into the
+// typed enum would still technically succeed (Go string-backed types
+// accept any string), but callers reading the raw field and comparing it
+// against the OverageNone/HeartbeatResurrectionNone constants directly
+// would get a false "not equal" without calling EffectiveOverageStrategy/
 // EffectiveResurrectionStrategy first. Keeping these three fields raw-typed
 // documents at the type level that a translation step is required.
 type PolicyAttributes struct {
@@ -214,10 +215,10 @@ type PolicyAttributes struct {
 // to a real OverageStrategy variant, falling back to OverageNone for any
 // unrecognized value — including the real-world policy-create default
 // "DENY_ACCESS", which is not a real OverageStrategy variant and which the
-// server itself silently treats as NoOverage (docs/sdk.md's Known
-// Server-Side Gaps #9). Do not surface the raw string as if it meant "deny
-// everything," which is what the field name implies and is not what
-// actually happens.
+// server itself silently treats as NoOverage (the Tamga API protocol
+// specification's Known Server-Side Gaps #9). Do not surface the raw
+// string as if it meant "deny everything," which is what the field name
+// implies and is not what actually happens.
 func EffectiveOverageStrategy(raw string) OverageStrategy {
 	switch OverageStrategy(raw) {
 	case Overage125x, Overage15x, Overage2x, OverageAlwaysAllow:
@@ -233,7 +234,7 @@ func EffectiveOverageStrategy(raw string) OverageStrategy {
 // HeartbeatResurrectionNone for any unrecognized value — including the
 // real-world policy-create default "NO_RESURRECTION", which is not a real
 // variant and which the server itself silently treats as NoRevive
-// (docs/sdk.md's Known Server-Side Gaps #9).
+// (the Tamga API protocol specification's Known Server-Side Gaps #9).
 func EffectiveResurrectionStrategy(raw string) HeartbeatResurrectionStrategy {
 	switch HeartbeatResurrectionStrategy(raw) {
 	case HeartbeatResurrection1Min, HeartbeatResurrection2Min, HeartbeatResurrection5Min,
