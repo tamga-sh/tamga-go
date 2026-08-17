@@ -1,6 +1,6 @@
-// Package tamga is the official Go SDK for Tamga — license activation,
-// offline (air-gapped) verification, and machine fleet management for
-// license-embedded Go applications.
+// Package tamga is the official Go SDK for Tamga. Integrate license
+// activation, offline verification, and machine management into your Go
+// applications.
 //
 // Import path: github.com/tamga-sh/tamga-go — the module path is the
 // package's import path, with no pkg/ nesting. This mirrors keygen-go
