@@ -23,10 +23,28 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      # The release PR must be authored by a GitHub App, not by the default
+      # GITHUB_TOKEN. GitHub deliberately refuses to trigger workflows from
+      # events attributed to GITHUB_TOKEN (recursion prevention), so a release
+      # PR opened with it never fires the CI workflow — the required status
+      # checks on main then never report, and the PR stays permanently
+      # blocked pending an admin override. A PR opened by an App installation
+      # token is treated as a normal actor's event and does trigger CI.
+      #
+      # This token is scoped to the release-please step alone (via its `token`
+      # input, not an env var) so nothing else in the pipeline can pick it up.
+      - name: Mint a GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Run release-please
         id: release
         uses: googleapis/release-please-action@v5
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
