@@ -5,10 +5,10 @@
 
 ### Features
 
-* implement client/transport, license, machine, entitlement, and error/policy sections (B/C/D/G/I/J/K) ([7f5b81f](https://github.com/tamga-sh/tamga-go/commit/7f5b81f81cb71663053c1f4093f4955aa4f5034f))
-* implement license checkout crypto verification (Section E) ([ee320d4](https://github.com/tamga-sh/tamga-go/commit/ee320d4b41c330a2223557c5256cc4a4f46c10dd))
-* implement machine checkout crypto verification (Section F) ([ab195e0](https://github.com/tamga-sh/tamga-go/commit/ab195e0b2ba5798686be559503c7d074e2e9a304))
-* implement machine offline proof generate/verify (Section H) ([0a0d6c0](https://github.com/tamga-sh/tamga-go/commit/0a0d6c074c969025e6170e95faf0f841e2b852b0))
+* implement client/transport, license, machine, entitlement, and error/policy sections ([7f5b81f](https://github.com/tamga-sh/tamga-go/commit/7f5b81f81cb71663053c1f4093f4955aa4f5034f))
+* implement license checkout crypto verification ([ee320d4](https://github.com/tamga-sh/tamga-go/commit/ee320d4b41c330a2223557c5256cc4a4f46c10dd))
+* implement machine checkout crypto verification ([ab195e0](https://github.com/tamga-sh/tamga-go/commit/ab195e0b2ba5798686be559503c7d074e2e9a304))
+* implement machine offline proof generate/verify ([0a0d6c0](https://github.com/tamga-sh/tamga-go/commit/0a0d6c074c969025e6170e95faf0f841e2b852b0))
 * SDK v2 security contract — license-file HKDF, offline format v2, HTTP 429 handling ([cf9ad3e](https://github.com/tamga-sh/tamga-go/commit/cf9ad3e670240f6dcbcab06f5b0cc63b71f1a055))
 
 
@@ -47,10 +47,10 @@
 
 ### Features
 
-* implement client/transport, license, machine, entitlement, and error/policy sections (B/C/D/G/I/J/K) ([7f5b81f](https://github.com/tamga-sh/tamga-go/commit/7f5b81f81cb71663053c1f4093f4955aa4f5034f))
-* implement license checkout crypto verification (Section E) ([ee320d4](https://github.com/tamga-sh/tamga-go/commit/ee320d4b41c330a2223557c5256cc4a4f46c10dd))
-* implement machine checkout crypto verification (Section F) ([ab195e0](https://github.com/tamga-sh/tamga-go/commit/ab195e0b2ba5798686be559503c7d074e2e9a304))
-* implement machine offline proof generate/verify (Section H) ([0a0d6c0](https://github.com/tamga-sh/tamga-go/commit/0a0d6c074c969025e6170e95faf0f841e2b852b0))
+* implement client/transport, license, machine, entitlement, and error/policy sections ([7f5b81f](https://github.com/tamga-sh/tamga-go/commit/7f5b81f81cb71663053c1f4093f4955aa4f5034f))
+* implement license checkout crypto verification ([ee320d4](https://github.com/tamga-sh/tamga-go/commit/ee320d4b41c330a2223557c5256cc4a4f46c10dd))
+* implement machine checkout crypto verification ([ab195e0](https://github.com/tamga-sh/tamga-go/commit/ab195e0b2ba5798686be559503c7d074e2e9a304))
+* implement machine offline proof generate/verify ([0a0d6c0](https://github.com/tamga-sh/tamga-go/commit/0a0d6c074c969025e6170e95faf0f841e2b852b0))
 
 
 ### Bug Fixes

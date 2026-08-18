@@ -1,8 +1,9 @@
 // Package crypto — aesgcm.go wraps stdlib crypto/cipher + crypto/aes for
 // AES-256-GCM, shared by both the license file (.lic) and machine file
-// (.machine) checkout formats. The two formats differ only in how the
-// 32-byte key is derived (naivekey.go vs hkdf.go) — this file only
-// implements the seal/open primitives themselves, key-agnostic.
+// (.machine) checkout formats. Both derive their 32-byte key with
+// HKDF-SHA256 and differ only in the salt/info pair they use (hkdf.go) —
+// this file only implements the seal/open primitives themselves,
+// key-agnostic.
 //
 // Wire format for both: nonce(12B) || ciphertext || tag(16B), random nonce
 // per checkout call.

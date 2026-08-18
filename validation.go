@@ -3,18 +3,19 @@ package tamga
 import "time"
 
 // ValidationCode is the license validation result code returned as
-// meta.code by all three validation endpoints (docs/sdk.md §2). It is a
-// plain string type rather than a closed Go enum on purpose: decoding an
-// unknown value into a string never fails, so this SDK never hard-errors
-// against a code the server adds in the future — callers that only
-// recognize known constants should fall back to a default case on switch.
+// meta.code by all three validation endpoints (Tamga API protocol
+// specification §2). It is a plain string type rather than a closed Go
+// enum on purpose: decoding an unknown value into a string never fails, so
+// this SDK never hard-errors against a code the server adds in the future
+// — callers that only recognize known constants should fall back to a
+// default case on switch.
 //
 // Only 14 of the 24 values below are reachable against the current server
 // implementation; the rest are declared for schema completeness and
 // forward-compatibility. Each constant below is marked reachable (✅) or
-// not (⛔) as of the server behavior documented in docs/sdk.md §2 and
-// docs/plans/tamga-go.plan.md Section K — do not build product logic
-// around a ⛔ value returning from a live call today.
+// not (⛔) as of the server behavior documented in the Tamga API protocol
+// specification §2 — do not build product logic around a ⛔ value returning
+// from a live call today.
 type ValidationCode string
 
 const (
@@ -79,9 +80,9 @@ const (
 // ValidationMeta is the `{ts, valid, detail, code}` object returned
 // alongside a license resource from ValidateByKey/ValidateByID (as the
 // JSON:API response's meta block), and as the entire flat body of
-// QuickValidate (docs/sdk.md §2). Code is stable and should drive branching
-// logic; Detail is human text and may change wording between server
-// versions.
+// QuickValidate (Tamga API protocol specification §2). Code is stable and
+// should drive branching logic; Detail is human text and may change
+// wording between server versions.
 type ValidationMeta struct {
 	TS     time.Time      `json:"ts"`
 	Detail string         `json:"detail"`

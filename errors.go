@@ -6,8 +6,9 @@ import "errors"
 //
 //	{"errors": [{id, status, code, title, detail, source: {pointer}}]}
 //
-// See docs/sdk.md §11. code is stable and should drive matching logic;
-// detail is human text and may change between server versions.
+// See the Tamga API protocol specification §11. code is stable and should
+// drive matching logic; detail is human text and may change between server
+// versions.
 type Error struct {
 	Source *ErrorSource `json:"source,omitempty"`
 	ID     string       `json:"id,omitempty"`
@@ -32,12 +33,10 @@ type ErrorResponse struct {
 }
 
 // APIError wraps a single Error plus the HTTP status it arrived with and
-// implements the error interface. This type and its Is/As support are
-// scaffolded ahead of client.go's real request execution because nearly
-// every other file in this package references APIError or a sentinel error
-// in its own doc comments (see docs/plans/tamga-go.plan.md Section K); the
-// sentinel error vars themselves (ErrNotFound, ErrFingerprintTaken, etc.)
-// are not declared yet and land with the endpoints that can return them.
+// implements the error interface. Every non-2xx response from this package
+// is mapped to an *APIError; match against the sentinels declared below
+// (ErrNotFound, ErrFingerprintTaken, ...) with errors.Is, which compares on
+// the stable Code rather than the human-readable Detail.
 type APIError struct {
 	Err        Error
 	Response   ResponseInfo
@@ -54,8 +53,9 @@ func (e *APIError) Error() string {
 
 // Is reports whether target is an *APIError with the same Code, so that
 // errors.Is(err, someSentinel) works regardless of wrapping. Matching is
-// deliberately on Code (stable, per docs/sdk.md §11) and never on Detail
-// (human text, may change between server versions).
+// deliberately on Code (stable, per the Tamga API protocol specification
+// §11) and never on Detail (human text, may change between server
+// versions).
 func (e *APIError) Is(target error) bool {
 	var t *APIError
 	if !errors.As(target, &t) || t == nil {
@@ -75,9 +75,10 @@ func (e *APIError) As(target any) bool {
 	return true
 }
 
-// Sentinel errors, fixed-status codes (docs/sdk.md §11). Match against
-// these with errors.Is; a real *APIError always carries the server's own
-// Detail/HTTPStatus, these sentinels only pin the stable Code.
+// Sentinel errors, fixed-status codes (Tamga API protocol specification
+// §11). Match against these with errors.Is; a real *APIError always
+// carries the server's own Detail/HTTPStatus, these sentinels only pin the
+// stable Code.
 //
 // ⚠️ Treat every sentinel below as read-only. APIError's fields (Err,
 // HTTPStatus, Response) are exported so this package can populate a fresh
@@ -105,10 +106,13 @@ var (
 	ErrDatasetInvalid      = &APIError{HTTPStatus: 422, Err: Error{Code: "DATASET_INVALID"}}
 )
 
-// NOTE: 429 TOO_MANY_REQUESTS is declared in the server's error enum but has
-// no constructor and is never returned by any code path today (docs/sdk.md
-// "Known Server-Side Gaps" #5) — deliberately not modeled as a sentinel
-// here; do not build client-side 429/backoff handling against it.
+// NOTE: 429 TOO_MANY_REQUESTS is live and handled in the transport layer, not
+// modeled as a sentinel here. (*Client).do (client.go) retries a throttled
+// request transparently — capped Retry-After, otherwise jittered exponential
+// backoff — for GET plus the five safe POST actions listed in
+// retryablePOSTSuffixes. Only once the retry budget (WithMaxRetries,
+// default DefaultMaxRetries) is exhausted does the 429 surface to the caller,
+// as an ordinary *APIError with HTTPStatus 429.
 
 // Local (client-side, non-API) verification errors returned by
 // (*LicenseFile).Verify and (*MachineFile).Verify — distinct from the

@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// Machine is the `machines` JSON:API resource (docs/sdk.md §5). Field set
-// matches the server's actual MachineResource/MachineAttributes
-// serializer — no relationships object, same as License.
+// Machine is the `machines` JSON:API resource (Tamga API protocol
+// specification §5). Field set matches the server's actual
+// MachineResource/MachineAttributes serializer — no relationships object,
+// same as License.
 type Machine struct {
 	ID         string            `json:"id"`
 	Type       string            `json:"type"`
@@ -44,9 +45,9 @@ type MachineAttributes struct {
 //
 // The window is a hardcoded 600s (10 min), not driven by
 // policy.heartbeat_duration despite that field existing on Policy
-// (docs/sdk.md's Known Server-Side Gaps #8). Treat DEAD as "machine likely
-// deleted server-side — re-activate rather than retry ping," per the
-// policy's HeartbeatCullStrategy.
+// (the Tamga API protocol specification's Known Server-Side Gaps #8).
+// Treat DEAD as "machine likely deleted server-side — re-activate rather
+// than retry ping," per the policy's HeartbeatCullStrategy.
 type HeartbeatStatus string
 
 // Heartbeat status constants — see HeartbeatStatus's doc comment for the
@@ -152,11 +153,11 @@ func isOverageCode(code ValidationCode) bool {
 // On that rollback path, ActivateMachine returns (nil, meta, err) with err
 // matching ErrMachineOverLimit (via errors.Is) — NOT (machine, meta, nil).
 // The machine has already been deleted server-side by the time this
-// returns; a caller that only checked `err == nil` before Section §4's
-// review would have been handed a stale, deleted machine's ID as if
-// activation had succeeded. meta is still populated so callers that want
-// the exact ValidationCode (to decide messaging, retry policy, etc.) can
-// inspect it despite the error.
+// returns, so branching on the returned machine without first checking err
+// would hand you a stale, deleted machine's ID as if activation had
+// succeeded. meta is still populated so callers that want the exact
+// ValidationCode (to decide messaging, retry policy, etc.) can inspect it
+// despite the error.
 //
 // Deletion failures during rollback are not surfaced beyond that — the
 // ErrMachineOverLimit/meta pair is what the caller most needs; a machine
@@ -205,10 +206,10 @@ func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine
 
 // HeartbeatScheduler periodically calls PingHeartbeat for one machine
 // until its context is canceled. The recommended default interval is
-// window/3 (~200s for the hardcoded 600s machine window) — see
-// docs/plans/tamga-go.plan.md Section G. Treat a DEAD status observed from
-// a ping's response as "machine likely deleted server-side — re-activate
-// rather than retry ping," per HeartbeatStatus's doc comment.
+// window/3 (~200s for the hardcoded 600s machine window), available as
+// DefaultHeartbeatInterval. Treat a DEAD status observed from a ping's
+// response as "machine likely deleted server-side — re-activate rather
+// than retry ping," per HeartbeatStatus's doc comment.
 type HeartbeatScheduler struct {
 	client    *Client
 	onTick    func(*Machine, error)
@@ -272,7 +273,8 @@ func (s *HeartbeatScheduler) Run(ctx context.Context) error {
 	}
 }
 
-// Component is the `components` JSON:API resource (docs/sdk.md §8).
+// Component is the `components` JSON:API resource (Tamga API protocol
+// specification §8).
 type Component struct {
 	ID         string              `json:"id"`
 	Type       string              `json:"type"`
@@ -302,7 +304,7 @@ type CreateComponentOptions struct {
 // POST /v1/accounts/{account_id}/components. Not JSON:API-enveloped on the
 // request side (unlike CreateMachine) — the server's handler expects a
 // flat {machine_id, fingerprint, name, metadata} body; this is a real
-// asymmetry in tamga-api, not an SDK oversight.
+// asymmetry in the server's API, not an SDK oversight.
 //
 // Unique per (account_id, machine_id, fingerprint) — a duplicate fails
 // with an error matching ErrFingerprintTaken (distinct call site from the
@@ -361,7 +363,8 @@ func (c *Client) ListComponents(ctx context.Context, machineID string, opts List
 	return page, nil
 }
 
-// Process is the `processes` JSON:API resource (docs/sdk.md §8).
+// Process is the `processes` JSON:API resource (Tamga API protocol
+// specification §8).
 type Process struct {
 	ID         string            `json:"id"`
 	Type       string            `json:"type"`
@@ -375,8 +378,9 @@ type Process struct {
 // RESURRECTED state like machines.
 //
 // PID is a string on the wire, not an integer — the server types PID as a
-// string (docs/sdk.md §8), and this SDK must send/accept PIDs as strings
-// even though PIDs are numeric OS values; never silently coerce to int.
+// string (Tamga API protocol specification §8), and this SDK must
+// send/accept PIDs as strings even though PIDs are numeric OS values;
+// never silently coerce to int.
 type ProcessAttributes struct {
 	PID             string          `json:"pid"`
 	MachineID       string          `json:"machine_id"`
@@ -389,15 +393,15 @@ type ProcessAttributes struct {
 // processHeartbeatWindow is the hardcoded 30-second process heartbeat
 // window — much shorter than a machine's 600s, and with no resurrection
 // grace period: a dead process row is deleted immediately, no KEEP_DEAD
-// equivalent (docs/sdk.md §8).
+// equivalent (Tamga API protocol specification §8).
 const processHeartbeatWindow = 30 * time.Second
 
 // CreateProcessOptions configures CreateProcess. MachineID and PID are
 // required; PID is always sent as a string, matching the server's wire
-// type (docs/sdk.md §8) — accept a string here rather than a numeric type
-// so a caller with a native numeric PID must explicitly stringify it
-// (strconv.Itoa(pid)), making the string-not-int wire contract visible at
-// the call site instead of silently coercing.
+// type (Tamga API protocol specification §8) — accept a string here rather
+// than a numeric type so a caller with a native numeric PID must
+// explicitly stringify it (strconv.Itoa(pid)), making the string-not-int
+// wire contract visible at the call site instead of silently coercing.
 type CreateProcessOptions struct {
 	Metadata  map[string]any
 	MachineID string
@@ -444,7 +448,7 @@ func (c *Client) PingProcess(ctx context.Context, processID string) (*Process, e
 
 // DefaultProcessHeartbeatInterval is the recommended ProcessHeartbeatScheduler
 // interval — at least every ~10s to stay safely inside the hardcoded 30s
-// process heartbeat window (docs/sdk.md §8).
+// process heartbeat window (Tamga API protocol specification §8).
 const DefaultProcessHeartbeatInterval = processHeartbeatWindow / 3
 
 // ProcessHeartbeatScheduler periodically calls PingProcess for one process

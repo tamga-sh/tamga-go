@@ -37,9 +37,10 @@ func representativeLicensePayloadJSON() string {
 }
 
 // buildLicensePEM builds a .lic PEM exactly the way the real server does
-// (docs/sdk.md §4): sign over enc's base64 STRING bytes, never its decoded
-// bytes. signOverDecodedBytes, when true, deliberately reproduces the
-// central bug this section guards against, for the regression test below.
+// (Tamga API protocol specification §4): sign over enc's base64 STRING
+// bytes, never its decoded bytes. signOverDecodedBytes, when true,
+// deliberately reproduces the central bug this file guards against, for
+// the regression test below.
 func buildLicensePEM(t *testing.T, payloadJSON string, priv ed25519.PrivateKey, encryptKey *[32]byte, signOverDecodedBytes bool) string {
 	t.Helper()
 	var enc, alg string

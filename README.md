@@ -1,8 +1,9 @@
-# tamga-go
+# github.com/tamga-sh/tamga-go
 
 [![CI](https://github.com/tamga-sh/tamga-go/actions/workflows/ci.yml/badge.svg)](https://github.com/tamga-sh/tamga-go/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tamga-sh/tamga-go.svg)](https://pkg.go.dev/github.com/tamga-sh/tamga-go)
 [![coverage](https://codecov.io/gh/tamga-sh/tamga-go/branch/main/graph/badge.svg)](https://codecov.io/gh/tamga-sh/tamga-go)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Official Go SDK for Tamga. Integrate license activation, offline verification, and machine
 management into your Go applications.
@@ -13,8 +14,15 @@ management into your Go applications.
 go get github.com/tamga-sh/tamga-go
 ```
 
-Package: `github.com/tamga-sh/tamga-go` · Docs: [pkg.go.dev/github.com/tamga-sh/tamga-go](https://pkg.go.dev/github.com/tamga-sh/tamga-go)
-· Supported Go versions: 1.22, 1.23.
+The import path is the module path — there is no `pkg/` nesting, and the package name is
+`tamga`:
+
+```go
+import "github.com/tamga-sh/tamga-go"
+```
+
+Supported Go versions: 1.22 and 1.23 (the matrix `.github/workflows/ci.yml` gates on). The one
+external dependency is `golang.org/x/crypto`, for HKDF.
 
 ## Quickstart
 
@@ -44,16 +52,35 @@ func main() {
 }
 ```
 
-See [`examples/`](examples/) for full runnable programs covering validation, check-in, offline
-license/machine file verification, the machine lifecycle (activate, heartbeat, offline proof),
-and entitlement checks.
+Activating a machine is `ActivateMachine`, which creates the machine and then validates the
+license, deleting the machine again if activation would exceed a limit:
+
+```go
+machine, meta, err := client.ActivateMachine(ctx, tamga.CreateMachineOptions{
+	LicenseID:   license.ID,
+	Fingerprint: "this-machine-fingerprint",
+}, nil)
+if errors.Is(err, tamga.ErrMachineOverLimit) {
+	log.Fatalf("activation refused: %s", meta.Code)
+}
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(machine.ID, machine.Attributes.HeartbeatStatus)
+```
+
+Keep it alive with `NewHeartbeatScheduler(client, machine.ID, tamga.DefaultHeartbeatInterval)`
+and `(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled.
+
+`examples/` holds runnable programs for validation, check-in, license/machine file verification,
+the machine lifecycle, and entitlement checks — `go run ./examples/validate -h` to start.
 
 ## Auth transports
 
 `tamga.New` requires exactly one auth transport, set via an `Option`. `WithLicenseKey` is the
 primary transport for embedded/client SDKs and this package's own default path; use `WithAuth`
-for any of the other four (mirrors `docs/sdk.md` §1's server try-order: Bearer → Basic → License
-→ Cookie → query param):
+for any of the others (the server's try-order is Bearer → Basic → License → Cookie → query
+param, but the SDK sends only the transport you configure).
 
 | Transport | Wire form | Option |
 |---|---|---|
@@ -65,42 +92,202 @@ for any of the other four (mirrors `docs/sdk.md` §1's server try-order: Bearer 
 | Session cookie | `Cookie: Tamga-Session=<uuid>` | `WithAuth(tamga.SessionCookieAuth{SessionID: id})` — browser/portal only, not relevant to most Go consumers |
 | Query parameter | `?token=<token>` | `WithAuth(tamga.QueryParamAuth{Token: token})` |
 
-## Security notice
+Every request also carries `Tamga-Version` (`DefaultAPIVersion`, overridable with
+`WithAPIVersion`) and, if set, `Tamga-OTP` via `WithOTP`.
 
-This SDK's offline verification code (license/machine checkout files, offline proofs) has to
-reproduce the Tamga server's exact signature and encryption conventions byte-for-byte —
-including several easy-to-get-backwards details. **Read this before relying on or modifying any
-verification code:**
+## Offline verification
 
-- The Ed25519 checkout signature (`.lic`/`.machine` files) covers the **base64 string bytes** of
-  the encrypted payload, not its decoded bytes. Getting this backwards silently accepts forged
-  files while passing a self-generated test fixture that repeats the same mistake — see
-  [`checkout_license.go`](checkout_license.go)'s `Verify` doc comment.
-- The `.lic` file's encryption key is the license key's raw UTF-8 bytes, zero-padded/truncated to
-  32 bytes — **not** a KDF (`internal/crypto/naivekey.go`). The `.machine` file's key, by
-  contrast, *is* a proper HKDF-SHA256 derivation (`internal/crypto/hkdf.go`) requiring both the
-  license key and the machine's fingerprint.
-- Machine checkout's signing scheme is driven by the **license's own `scheme` field**, never
-  guessed from the file's `alg` string — `RSA_2048_PKCS1_SIGN` and `RSA_2048_JWT_RS256` share an
-  alg suffix server-side and cannot be safely disambiguated from file content alone.
-  `RSA_2048_JWT_RS256` itself is rejected outright for machine files.
-- The offline-proof payload's JSON serialization must match the server's field order
-  byte-for-byte (alphabetical at every nesting level, not source-code order) — see
-  [`proof.go`](proof.go)'s doc comments for how this SDK reproduces that.
+Three offline artifacts, all verifiable with no network access once you hold the account's
+public key.
+
+### License files (`.lic`)
+
+`CheckOutLicense` downloads the certificate; `(*LicenseFile).Verify` checks the Ed25519
+signature, decrypts if the file is encrypted, and enforces the signed expiry.
+
+```go
+package main
+
+import (
+	"crypto/ed25519"
+	"errors"
+	"fmt"
+	"log"
+
+	"github.com/tamga-sh/tamga-go"
+)
+
+func verifyLicenseFile(pemText string, accountPubKey ed25519.PublicKey, licenseKey string) {
+	file, err := tamga.ParseLicenseFile(pemText)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// licenseKey is needed only for an "aes-256-gcm+ed25519+v2" file;
+	// pass "" for a plain "base64+ed25519+v2" one.
+	payload, err := file.Verify(accountPubKey, licenseKey)
+
+	var expired *tamga.ExpiredError
+	switch {
+	case err == nil:
+		fmt.Printf("valid until %d: status=%s\n",
+			payload.Claims.ExpiresAt, payload.Data.Attributes.Status)
+	case errors.As(err, &expired):
+		fmt.Printf("file expired at %d — check out a fresh one\n", expired.ExpiresAt)
+	case errors.Is(err, tamga.ErrMissingClaims):
+		fmt.Println("pre-v2 file — re-issue it, there is no fallback path")
+	case errors.Is(err, tamga.ErrInvalidSignature):
+		fmt.Println("forged or corrupted file")
+	default:
+		log.Fatal(err)
+	}
+}
+```
+
+Set `LicenseFile.Now` to a server-supplied timestamp if you do not want to trust the local clock
+(a user winding their system clock back is the obvious way to revive an expired file).
+
+### Machine files (`.machine`)
+
+Same envelope, but the signing algorithm is chosen by the governing license's own `Scheme` —
+never by parsing the file's self-declared `alg` — and decryption needs both the license key and
+the target machine's fingerprint.
+
+```go
+file, err := tamga.ParseMachineFile(pemText)
+if err != nil {
+	log.Fatal(err)
+}
+
+// scheme comes from the license, not the file. Pass tamga.SchemeEd25519Sign
+// when the license has no scheme set — that is the server's own default.
+// pub must match: ed25519.PublicKey, *rsa.PublicKey, or *ecdsa.PublicKey.
+payload, err := file.Verify(tamga.SchemeEd25519Sign, accountPubKey, licenseKey, fingerprint)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(payload.Data.Attributes.Fingerprint)
+```
+
+`tamga.ParsePKIXPublicKey(der)` is re-exported for loading an RSA/ECDSA key from an SPKI DER
+blob without importing `crypto/x509` yourself.
+
+### Offline proofs
+
+A lighter alternative to a full machine checkout: `GenerateOfflineProof` returns a
+`"v1x0.<base64>"` string, and `VerifyOfflineProof` checks it against the exact tuple it was
+generated for.
+
+```go
+machine, proof, err := client.GenerateOfflineProof(ctx, machineID, map[string]any{"cores": 8})
+if err != nil {
+	log.Fatal(err)
+}
+
+err = tamga.VerifyOfflineProof(
+	accountRSAPubKey,
+	accountID,
+	machine.ID,
+	machine.Attributes.Fingerprint,
+	map[string]any{"cores": 8},
+	proof,
+)
+fmt.Println("proof valid:", err == nil)
+```
+
+## Security notes
+
+Every claim below is implemented at the cited location.
+
+- **Offline license files are format v2 only.** `alg` must be `base64+ed25519+v2` or
+  `aes-256-gcm+ed25519+v2`, and the signed payload must carry `meta` claims (`iat`, `exp`,
+  `jti`, `kid`). A pre-v2 file is rejected with `ErrMissingClaims`
+  (`checkout_license.go::(*LicenseFile).Verify`). **This is a behavioral break:** v1 `.lic`
+  files fail verification outright, with no fallback path. Re-issue them via `CheckOutLicense`.
+- **The signed `exp` is enforced, with a 60-second clock-skew tolerance**
+  (`checkout_license.go::clockSkewToleranceSeconds`, applied in `(*LicenseFile).Verify`). The
+  tolerance is deliberately small: the local clock is attacker-controlled, so a generous
+  allowance is a free extension on every expired file. In v1 the requested `ttl`/`expiry` lived
+  only in the response envelope, outside the signature — which made a 24-hour trial file
+  cryptographically valid forever.
+- **Both file formats derive their AES-256-GCM key with HKDF-SHA256.** License files use
+  salt `tamga:license-file-key-v1`, ikm = the license key, info `license-file`
+  (`internal/crypto/hkdf.go::DeriveLicenseFileKey`). Machine files use salt
+  `tamga:machine-file-key-v1`, ikm = the license key, info = the machine fingerprint
+  (`internal/crypto/hkdf.go::DeriveMachineFileKey`), so a machine file cannot be opened anywhere
+  but on the machine it was issued for. The earlier license-file transform — raw UTF-8 license
+  key bytes zero-padded/truncated to 32 — was removed, not deprecated.
+- **The signature covers the base64 *string* bytes of `enc`, not its decoded bytes**
+  (`checkout_license.go::(*LicenseFile).Verify`,
+  `checkout_machine.go::(*MachineFile).Verify`). Getting this backwards silently accepts forged
+  files while still passing a self-generated fixture that repeats the same mistake — there is a
+  dedicated regression test for exactly that in `checkout_license_test.go`.
+- **Verification is fail-closed and ordered.** The signature is checked before `enc` is
+  base64-decoded, decrypted, or parsed as JSON, so attacker-controlled bytes never reach a
+  decoder first (`checkout_license.go::(*LicenseFile).Verify`).
+- **Machine-file algorithm selection is driven by the license's `Scheme` parameter, never by the
+  file's self-declared `alg`** (`checkout_machine.go::verifyMachineFileSignature`). `alg`'s
+  suffix is only cross-checked as defence in depth (`checkout_machine.go::schemeAlgSuffix`),
+  because `RSA_2048_PKCS1_SIGN` and `RSA_2048_JWT_RS256` share a suffix server-side and cannot be
+  told apart from file content. `RSA_2048_JWT_RS256` is rejected up front with
+  `ErrSchemeNotSupported`.
+- **Offline-proof payloads are serialized byte-exactly.** Keys are sorted alphabetically at every
+  nesting level via `map[string]any` (`proof.go::buildOfflineProofPayloadJSON`), and
+  `proof.go::serdeCompatMarshal` disables Go's HTML escaping and reverses its unconditional
+  U+2028/U+2029 escaping, so a dataset value containing `<`, `>`, `&`, or a Unicode line
+  separator still hashes to the same bytes the server signed.
+- **HTTP 429 is handled client-side.** `client.go::(*Client).do` retries a throttled request
+  transparently: `parseRetryAfter` reads `Retry-After` as delta-seconds, `retryDelay` caps it at
+  60s and otherwise uses jittered exponential backoff, and `isRetryable` scopes auto-retry to
+  `GET` plus the five safe `POST` actions in `client.go::retryablePOSTSuffixes` — `validate`,
+  `validate-key`, `check-in`, `check-out`, `ping`. Creates are deliberately excluded: retrying
+  `POST /machines` can burn a second seat, and only you know whether that is acceptable. The
+  budget is `DefaultMaxRetries` (3); `WithMaxRetries(0)` hands the `*APIError` straight back.
+- **Every caller-supplied ID is path-escaped before interpolation**
+  (`client.go::escapePathSegment`, `client.go::buildURL`), so an ID containing `/`, `?`, or `#`
+  cannot redirect a request or inject query parameters.
+- **Server error bodies are never trusted to be well-formed.** A non-JSON:API error page falls
+  back to a synthetic `UNKNOWN` `*APIError` carrying only the status (`client.go::mapError`).
 
 `checkout_license.go`, `checkout_machine.go`, `proof.go`, and everything under
-`internal/crypto/` carry a mandatory security-reviewer gate before merge for exactly this reason
-— see [`SECURITY.md`](SECURITY.md).
+`internal/crypto/` carry a mandatory security review before merge — see
+[`SECURITY.md`](SECURITY.md).
+
+## Known gaps
+
+- **`.machine` files carry no signed expiry.** Only `.lic` files have the v2 `meta` claims;
+  `(*MachineFile).Verify` enforces the signature and the scheme, not a lifetime. A machine
+  file's practical bound is the `ttl` requested at checkout plus the fact that decryption
+  requires the target fingerprint.
+- **`Scope.Entitlements`, `Fingerprint`, `Version`, and `Checksum` are sent but not enforced.**
+  The server parses and ignores them today; only `Product`, `Policy`, `User`, and `Environment`
+  constrain validation. They are modeled for forward-compatibility — see `license.go`'s `Scope`
+  doc comment. Do not build product logic on them yet.
+- **10 of the 24 `ValidationCode` values are unreachable against the current server.** Each
+  constant in `validation.go` is marked reachable or not; do not branch on a value that cannot
+  come back today.
+- **The machine heartbeat window is a hardcoded 600s**, not driven by the policy's
+  `heartbeat_duration` field despite that field existing (`machine.go`, `HeartbeatStatus`).
+  `DefaultHeartbeatInterval` is window/3.
+- **`HasEntitlement` fetches at most one page** (100 entitlements, the server's max page size)
+  and caches codes in memory for 60s. For larger entitlement sets, paginate `ListEntitlements`
+  directly.
+- **Offline-proof datasets should stick to integers, strings, and typical floats.**
+  `serdeCompatMarshal` closes the escaping gaps between Go and the server's JSON encoder, but
+  not float formatting at extreme magnitudes (e.g. `1e20`), where the two can pick different
+  decimal-vs-scientific cutoffs — see `proof.go::GenerateOfflineProof`.
+- **No auto-update / release-checking API**, and **no RFC 9421 response-signature verification**
+  — neither has a working server-side counterpart, so neither is implemented here.
 
 ## Documentation
 
 - [pkg.go.dev/github.com/tamga-sh/tamga-go](https://pkg.go.dev/github.com/tamga-sh/tamga-go) —
   generated API reference.
-- [`tamga-api`'s `docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md) —
-  the authoritative protocol/feature reference this SDK implements against, including the
-  server-side gaps that are deliberately out of scope for this SDK's v1.
+- [tamga.sh](https://tamga.sh) — product documentation and the API protocol reference.
+- [`examples/`](examples) — runnable programs for every major flow.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — dev setup and PR expectations.
-- [`SECURITY.md`](SECURITY.md) — vulnerability reporting process.
+- [`SECURITY.md`](SECURITY.md) — vulnerability reporting and the offline-format compatibility
+  warning.
 
 ## License
 

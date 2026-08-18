@@ -15,15 +15,13 @@
 //   - ecdsa.go     stdlib crypto/ecdsa wrapper — P-256 verify
 //   - aesgcm.go    stdlib crypto/cipher + crypto/aes wrapper — AES-256-GCM open/seal
 //   - hkdf.go      golang.org/x/crypto/hkdf wrapper — the module's one external dependency
-//   - naivekey.go  zero-pad/truncate-to-32-bytes transform — NOT a KDF, license checkout only
 //
-// stdlib covers every scheme this SDK verifies against except HKDF (needed
-// for machine-file key derivation, docs/sdk.md §6) — golang.org/x/crypto/hkdf
-// has no stdlib equivalent, which is why it is this module's sole external
-// dependency (see ../docs/plans/tamga-go.plan.md §2, one directory up in the
-// sibling tamga-sdk monorepo).
+// stdlib covers every scheme this SDK verifies against except HKDF, which
+// derives the AES-256-GCM key for BOTH offline file formats (license and
+// machine — see hkdf.go for the salt/info split between them).
+// golang.org/x/crypto/hkdf has no stdlib equivalent, which is why it is this
+// module's sole external dependency.
 //
 // Every file in this package is implemented, tested, and has passed a
-// security-reviewer gate (Sections E, F, and H — see
-// ../docs/plans/tamga-go.plan.md for the per-section checklist).
+// dedicated security review — see ../SECURITY.md.
 package crypto

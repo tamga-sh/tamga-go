@@ -23,11 +23,11 @@ const (
 )
 
 // maxCheckoutTTLSeconds is the server-validated upper bound for a checkout
-// TTL — 365 days (docs/sdk.md §6). Both license and machine checkout
-// accept a ttl param, but only machine checkout validates it server-side;
-// this SDK pre-checks it client-side only for CheckOutMachine, mirroring
-// that asymmetry rather than inventing a client-side check the server
-// itself doesn't enforce for license checkout.
+// TTL — 365 days (Tamga API protocol specification §6). Both license and
+// machine checkout accept a ttl param, but only machine checkout validates
+// it server-side; this SDK pre-checks it client-side only for
+// CheckOutMachine, mirroring that asymmetry rather than inventing a
+// client-side check the server itself doesn't enforce for license checkout.
 const maxCheckoutTTLSeconds = 365 * 24 * 3600
 
 // checkTTL mirrors the server's validated ttl range for machine checkout
@@ -172,7 +172,13 @@ type MachinePayload struct {
 //
 // licenseKey/fingerprint are required only for an encrypted
 // (aes-256-gcm+...) file — both are needed to re-derive the HKDF key (see
-// internal/crypto/hkdf.go); pass "" for a plain file.
+// internal/crypto/hkdf.go); pass "" for a plain file. Needing the
+// fingerprint is what binds a machine file to one machine: it cannot be
+// opened anywhere else, even with the license key.
+//
+// Unlike a license file, a machine file carries no signed meta claims, so
+// there is no exp for this method to enforce — its lifetime is bounded by
+// the ttl requested at checkout and by that fingerprint binding.
 //
 // ⚠️ SchemeRSA2048JWTRS256 is rejected up front — before any parsing or
 // crypto primitive is invoked — with an error matching ErrSchemeNotSupported,

@@ -82,10 +82,9 @@ func ParseProof(proof string) ([]byte, error) {
 // ⚠️ THE CENTRAL GOTCHA OF THIS FILE: the server builds this payload via
 // Rust's serde_json::json!({"account": ..., "machine": ..., "dataset":
 // ...}) macro — but serde_json::Map is BTreeMap-backed (alphabetically
-// sorted output) in tamga-api's dependency graph (confirmed: no `indexmap`
-// paired with `serde_json` to enable the `preserve_order` feature — see
-// tamga-rust's CLAUDE.md and its proof.rs module doc comment, the
-// ground-truth analysis this Go port relies on). So despite the server's
+// sorted output) in the server's dependency graph (confirmed: no `indexmap`
+// paired with `serde_json` to enable the `preserve_order` feature). So
+// despite the server's
 // source code being written in "account, machine, dataset" order, the
 // actual bytes on the wire are alphabetically sorted at EVERY nesting
 // level: {"account":{"id":...},"dataset":...,"machine":{"fingerprint":...,
@@ -96,9 +95,9 @@ func ParseProof(proof string) ([]byte, error) {
 // A fixed-field-order Go struct declared in the server's literal source
 // order would therefore be WRONG here — it would produce
 // {"account":...,"machine":...,"dataset":...}, which does not match the
-// wire bytes. The correct approach (used here, mirroring tamga-rust's own
-// serde_json::Value-based fix) is building the payload from nested
-// map[string]any and letting encoding/json's own key-sorting do the work:
+// wire bytes. The correct approach (used here) is building the payload
+// from nested map[string]any and letting encoding/json's own key-sorting
+// do the work:
 // Go's encoding/json unconditionally sorts map[string]T keys alphabetically
 // when marshaling (this is a documented stdlib guarantee, not
 // version-dependent behavior like Rust's serde_json — verified directly:
@@ -116,7 +115,7 @@ func ParseProof(proof string) ([]byte, error) {
 // escapes '<', '>', and '&' to "<"/">"/"&" by default, and
 // (b) unconditionally escapes U+2028/U+2029 (LINE SEPARATOR/PARAGRAPH
 // SEPARATOR) regardless of that setting — neither of which
-// tamga-api's pinned serde_json version does by default. A dataset value
+// the server's pinned serde_json version does by default. A dataset value
 // containing any of those five characters (a URL query string, a pasted
 // line of rich text, an email display name, ...) would otherwise produce
 // different signed bytes client-side than the server actually signed,

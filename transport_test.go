@@ -84,7 +84,7 @@ func TestBasicAuth_Apply(t *testing.T) {
 // TestDefaultTransportIsLicenseKeyFirst asserts the SDK's own default
 // transport (via WithLicenseKey, New's primary auth shorthand) is
 // License-key-first — independent of the server's documented Bearer-first
-// try-order (docs/sdk.md §1) — per docs/plans/tamga-go.plan.md Section B.
+// try-order (Tamga API protocol specification §1).
 func TestDefaultTransportIsLicenseKeyFirst(t *testing.T) {
 	var gotAuth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

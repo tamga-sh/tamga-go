@@ -17,10 +17,11 @@ import (
 
 // defaultBaseURL is the production Tamga API host, matching the example
 // host used consistently across every sibling SDK's README
-// (docs/sdk.md gives no single canonical default, but every hand-written
-// Tamga SDK's documentation uses "https://api.tamga.sh" as the example —
-// this SDK follows that convention as its zero-config default so New only
-// strictly requires an account ID and an auth transport).
+// (the Tamga API protocol specification gives no single canonical default,
+// but every hand-written Tamga SDK's documentation uses
+// "https://api.tamga.sh" as the example — this SDK follows that convention
+// as its zero-config default so New only strictly requires an account ID
+// and an auth transport).
 const defaultBaseURL = "https://api.tamga.sh"
 
 // Client is the Tamga API client. Every public method takes
@@ -93,9 +94,9 @@ func WithAuth(auth AuthTransport) Option {
 // an error if neither option was supplied.
 //
 // The {account_id} path segment is required on every request in both
-// singleplayer and multiplayer server modes (docs/sdk.md §1) — there is no
-// mode where it can be omitted, so it is a required positional argument
-// here rather than an Option.
+// singleplayer and multiplayer server modes (Tamga API protocol
+// specification §1) — there is no mode where it can be omitted, so it is a
+// required positional argument here rather than an Option.
 func New(accountID string, opts ...Option) (*Client, error) {
 	if accountID == "" {
 		return nil, fmt.Errorf("tamga: accountID must not be empty")
@@ -118,7 +119,7 @@ func New(accountID string, opts ...Option) (*Client, error) {
 
 // contentTypeJSONAPI is the default Content-Type for every JSON:API
 // request/response in this package, except quick-validate's flat-JSON
-// special case (docs/sdk.md §1).
+// special case (Tamga API protocol specification §1).
 const contentTypeJSONAPI = "application/vnd.api+json"
 
 // DefaultMaxRetries is how many times a rate-limited (429) request is retried
@@ -144,8 +145,9 @@ func WithMaxRetries(n int) Option {
 // buildURL joins the configured base URL, the required
 // /v1/accounts/{account_id} prefix, and path into a full request URL.
 // account_id is path-escaped since it may be either a UUID or an
-// account-code-style string (docs/sdk.md §1 — both forms are valid and
-// this segment is always present regardless of which form is used).
+// account-code-style string (Tamga API protocol specification §1 — both
+// forms are valid and this segment is always present regardless of which
+// form is used).
 func (c *Client) buildURL(path string) string {
 	return c.baseURL + "/v1/accounts/" + url.PathEscape(c.accountID) + path
 }
@@ -423,7 +425,8 @@ func decodeJSONAPIWithMeta[T any, M any](ctx context.Context, c *Client, method,
 
 // decodeFlat sends a request expecting a flat (non-enveloped) JSON body —
 // used only by QuickValidate today, which returns plain application/json
-// with no "data" key (docs/sdk.md §1's documented special case).
+// with no "data" key (the Tamga API protocol specification §1's documented
+// special case).
 func decodeFlat[T any](ctx context.Context, c *Client, method, path string) (T, error) {
 	var zero T
 	req, err := c.newRequest(ctx, method, path, nil)

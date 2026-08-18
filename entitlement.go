@@ -11,7 +11,7 @@ import (
 )
 
 // Entitlement is the `entitlements` JSON:API resource
-// (docs/sdk.md §9). Despite the URL nesting under
+// (Tamga API protocol specification §9). Despite the URL nesting under
 // /licenses/{id}/entitlements, list/get on this endpoint return full
 // Entitlement resources, not lightweight junction/relationship records.
 type Entitlement struct {
@@ -34,7 +34,8 @@ type EntitlementAttributes struct {
 }
 
 // ListOptions is the shared keyset-pagination request shape used by
-// ListComponents and ListEntitlements (docs/sdk.md §8/§9).
+// ListComponents and ListEntitlements (Tamga API protocol specification
+// §8/§9).
 type ListOptions struct {
 	After *string
 	Limit int
@@ -172,8 +173,8 @@ func (c *Client) HasEntitlement(ctx context.Context, licenseID, code string) (bo
 
 // InvalidateEntitlementCache drops the cached entitlement list for
 // licenseID, forcing the next HasEntitlement call to refetch regardless of
-// TTL — the explicit invalidation/refresh method backing the in-memory
-// cache described in docs/plans/tamga-go.plan.md Section J.
+// TTL — the explicit invalidation hatch for the in-memory cache
+// HasEntitlement reads from.
 func (c *Client) InvalidateEntitlementCache(licenseID string) {
 	cache := c.entitlementCacheFor()
 	cache.mu.Lock()
