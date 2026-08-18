@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/tamga-sh/tamga-go/compare/v1.2.1...v1.2.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* open release PRs with a GitHub App token and report the released version in the User-Agent ([#18](https://github.com/tamga-sh/tamga-go/issues/18)) ([f60dd25](https://github.com/tamga-sh/tamga-go/commit/f60dd25c0845141e8dbc9db7c7000f2d94d4b490))
+
 ## [1.2.1](https://github.com/tamga-sh/tamga-go/compare/v1.2.0...v1.2.1) (2026-08-18)
 
 

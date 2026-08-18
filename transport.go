@@ -133,7 +133,7 @@ const DefaultAPIVersion = "1.8"
 // "extra-files" in release-please-config.json so the updater actually visits
 // this file. Do not hand-edit the version or drop the annotation: without it
 // the constant silently drifts and misreports the SDK version to the server.
-const userAgent = "tamga-go/1.2.1" // x-release-please-version
+const userAgent = "tamga-go/1.2.2" // x-release-please-version
 
 // sanitizeVersion filters a Tamga-Version header value down to the
 // server's accepted character set (alphanumeric plus '.'/'-'), truncated
