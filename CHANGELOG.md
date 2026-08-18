@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/tamga-sh/tamga-go/compare/v1.2.0...v1.2.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* correct SDK documentation and align package metadata ([4f929a1](https://github.com/tamga-sh/tamga-go/commit/4f929a19cd582dbdcbc8b55a220d5a3107a465cc))
+
 ## [1.2.0](https://github.com/tamga-sh/tamga-go/compare/v1.1.0...v1.2.0) (2026-08-13)
 
 
