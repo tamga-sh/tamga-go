@@ -12,6 +12,12 @@ jobs:
   test:
     name: test (go${{ matrix.go-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The slowest leg of this matrix has been ~71s (go1.23/windows-latest);
+    # every other leg lands between 26s and 65s. 20 minutes is ~17x that, so
+    # it never trips on a slow runner, but a wedged toolchain download or
+    # network install is killed in 20 minutes instead of running out the
+    # 360-minute GitHub default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +32,9 @@ jobs:
       # declared once, not duplicated between go.mod and this matrix.
       - name: Set up Go
         uses: actions/setup-go@v7
+        # Downloads the Go toolchain; observed 9-31s, and it is the step most
+        # likely to stall silently on a slow or unreachable mirror.
+        timeout-minutes: 10
         with:
           go-version-file: go.mod
 
@@ -37,6 +46,10 @@ jobs:
         # top-level "version") as unknown. v7 is the first action version
         # with v2 support.
         uses: golangci/golangci-lint-action@v9
+        # `version: latest` resolves and downloads a golangci-lint binary on
+        # every run; the lint itself is only 3-11s, so the bound is purely for
+        # a hung download.
+        timeout-minutes: 10
         with:
           version: latest
 
@@ -90,6 +103,10 @@ jobs:
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
+        # Fetches the Codecov uploader binary and then talks to codecov.io;
+        # observed 2-9s. fail_ci_if_error is false, so a timeout here cannot
+        # fail the job either.
+        timeout-minutes: 10
         with:
           files: coverage.out
           token: ${{ secrets.CODECOV_TOKEN }}
