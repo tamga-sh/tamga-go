@@ -19,6 +19,11 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    # Observed 7-14s end to end (token mint ~1s, release-please action ~6s).
+    # 15 minutes leaves enormous headroom while still bounding a hung GitHub
+    # API call, which would otherwise sit on the 360-minute default and block
+    # the release PR for the whole window.
+    timeout-minutes: 15
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
@@ -53,6 +58,8 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    # A single curl; observed 7-8s including runner setup.
+    timeout-minutes: 10
     steps:
       # The Go module proxy indexes a new version on-demand, the first time
       # something asks it for that version — which normally means the very
@@ -67,5 +74,8 @@ jobs:
       # tags require the "v" prefix, and release-please's "go" release-type
       # already produces tags in that form.
       - name: Request version from proxy.golang.org
+        # curl here has no --max-time of its own, so an unresponsive
+        # proxy.golang.org would hang this step producing no output.
+        timeout-minutes: 10
         run: |
           curl -fsSL "https://proxy.golang.org/github.com/tamga-sh/tamga-go/@v/${{ needs.release-please.outputs.tag_name }}.info"
