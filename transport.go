@@ -126,7 +126,14 @@ const DefaultAPIVersion = "1.8"
 
 // userAgent is the default User-Agent sent for support/debugging purposes,
 // even though the server has no requirement or handling for it.
-const userAgent = "tamga-go/0.1.0"
+//
+// The version here is rewritten in place by release-please on every release —
+// the trailing annotation marks the line for its generic updater, which
+// replaces the semver-looking token on it. transport.go is registered under
+// "extra-files" in release-please-config.json so the updater actually visits
+// this file. Do not hand-edit the version or drop the annotation: without it
+// the constant silently drifts and misreports the SDK version to the server.
+const userAgent = "tamga-go/1.2.1" // x-release-please-version
 
 // sanitizeVersion filters a Tamga-Version header value down to the
 // server's accepted character set (alphanumeric plus '.'/'-'), truncated
