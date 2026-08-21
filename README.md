@@ -77,15 +77,17 @@ and `(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled.
 > `errors.Is(err, tamga.ErrNotFound)` and off nothing else. `Run` is written that way: it never
 > inspects the status, and only context cancellation ends its loop.
 >
-> **`DEAD` is not reachable from any call this SDK makes today.** `PingHeartbeat` writes
+> **`DEAD` is not reachable from the heartbeat routes.** `PingHeartbeat` writes
 > `last_heartbeat_at = NOW()` and then derives the status from that same timestamp, so its
 > response is always `ALIVE` or `RESURRECTED`; `ResetHeartbeat` and `CreateMachine` both answer
-> `NOT_STARTED`. `DEAD` is a real server state, visible only from a machine read this SDK does
-> not expose yet — so a `case DEAD` branch written against a ping is dead code. And even when
-> readable it would mean only that the last ping is older than the window, **not** that the
-> machine was culled: the server never looks at the policy's `require_heartbeat` flag when
-> computing it, and the culling job early-returns unless that flag is set — which it is **not**,
-> by default. A machine can report `DEAD` forever with its row and its seat intact.
+> `NOT_STARTED`. A `case DEAD` branch written against a ping is dead code. It **is** reachable
+> from `CheckOutMachine` (on `MachinePayload.Data`, after `MachineFile.Verify`) and
+> `GenerateOfflineProof` (on the `*Machine` it returns) — both read the machine instead of
+> writing it, so handle `DEAD` there. Wherever it appears it means only that the last ping is
+> older than the window, **not** that the machine was culled: the server never looks at the
+> policy's `require_heartbeat` flag when computing it, and the culling job early-returns unless
+> that flag is set — which it is **not**, by default. A machine can report `DEAD` forever with
+> its row and its seat intact.
 >
 > ```go
 > hbCtx, cancel := context.WithCancel(ctx)
@@ -348,14 +350,16 @@ Every claim below is implemented at the cited location.
   explicit interval to `NewHeartbeatScheduler` — and today they must learn their own window out
   of band, because this SDK models the field as `PolicyAttributes.HeartbeatDuration` but exposes
   no call that returns a `Policy` (`machine.go`, `HeartbeatStatus`).
-- **`HeartbeatStatus == DEAD` is unreachable through this SDK — and never meant deletion
-  anyway.** Every route here returns a machine that cannot be `DEAD`: `PingHeartbeat` writes
-  `last_heartbeat_at = NOW()` and only then derives the status from it, so it answers `ALIVE` or
-  `RESURRECTED`, and `ResetHeartbeat`/`CreateMachine` answer `NOT_STARTED`. `DEAD` is a real
-  server state, visible only from a machine read this SDK does not expose yet — `HeartbeatDead`
-  and `MachineAttributes.HeartbeatStatus` stay modeled because both go live when that method
-  lands, but a `case DEAD` branch written against a ping today is dead code. When it becomes
-  readable it reports staleness, not deletion: the server computes it purely from
+- **`HeartbeatStatus == DEAD` is route-dependent — and never meant deletion on any of them.**
+  The heartbeat routes cannot report it: `PingHeartbeat` writes `last_heartbeat_at = NOW()` and
+  only then derives the status from it, so it answers `ALIVE` or `RESURRECTED`, and
+  `ResetHeartbeat`/`CreateMachine` answer `NOT_STARTED` — a `case DEAD` branch written against a
+  ping is dead code. The two routes that *read* the machine rather than write it do report it:
+  `CheckOutMachine` (on `MachinePayload.Data`, after `MachineFile.Verify`) and
+  `GenerateOfflineProof` (on the `*Machine` it returns). Those two also join the policy, so their
+  `HeartbeatStatus` and `NextHeartbeatAt` are measured against the real `heartbeat_duration`
+  rather than the 600s fallback — the only place this SDK sees the true window. Wherever it
+  appears, `DEAD` reports staleness, not deletion: the server computes it purely from
   `last_heartbeat_at` versus the window and never consults `require_heartbeat`, and the culling
   job early-returns unless that column is true — it **defaults to false**, so on a default policy
   nothing is ever culled and `heartbeat_cull_strategy`/`heartbeat_resurrection_strategy` are both

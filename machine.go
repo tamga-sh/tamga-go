@@ -31,11 +31,14 @@ type Machine struct {
 // activation.
 //
 // NextHeartbeatAt is the server's own view of when the next ping is due:
-// last_heartbeat_at plus the effective window. It is not a dependable read
-// of the policy's window on every route — the ping and reset-heartbeat
-// routes do not join the policy, so a PingHeartbeat response derives both
-// NextHeartbeatAt and HeartbeatStatus from the 600s fallback whatever the
-// policy says. See HeartbeatStatus's doc comment for the window itself.
+// last_heartbeat_at plus the effective window. Which window that is
+// depends on the route. The ping and reset-heartbeat routes do not join
+// the policy, so a PingHeartbeat response derives both NextHeartbeatAt
+// and HeartbeatStatus from the 600s fallback whatever the policy says.
+// CheckOutMachine and GenerateOfflineProof do join it, so on those two
+// both fields are computed against the policy's real heartbeat_duration —
+// they are the only place this SDK sees the true window. See
+// HeartbeatStatus's doc comment for the window itself.
 type MachineAttributes struct {
 	Platform        *string         `json:"platform"`
 	NextHeartbeatAt *string         `json:"next_heartbeat_at"`
@@ -78,29 +81,34 @@ type MachineAttributes struct {
 // NOT_FOUND — errors.Is(err, ErrNotFound), meaning the row is gone. Hang
 // re-activation off that, and off nothing else.
 //
-// ⚠️ DEAD in particular is not reachable from any call this SDK makes
-// today. Client.PingHeartbeat writes last_heartbeat_at = NOW() and then
-// derives the status from that same timestamp, so its response is always
-// ALIVE or RESURRECTED; Client.ResetHeartbeat nulls the column and
-// Client.CreateMachine never sets it, so both answer NOT_STARTED. DEAD is
-// a real server state — it is simply only visible from a machine *read*
-// (GET /machines/{id} or the machine list), which this SDK does not
-// expose yet. HeartbeatDead and MachineAttributes.HeartbeatStatus stay
-// modeled because both go live the moment a machine-read method lands.
-// Until then, a `case DEAD` branch in caller code is dead code.
+// ⚠️ Which statuses you can actually observe depends on the route, and
+// DEAD is not one of them on the heartbeat routes. Client.PingHeartbeat
+// writes last_heartbeat_at = NOW() and then derives the status from that
+// same timestamp, so its response is always ALIVE or RESURRECTED;
+// Client.ResetHeartbeat nulls the column and Client.CreateMachine never
+// sets it, so both answer NOT_STARTED. A `case DEAD` branch written
+// against any of those three is dead code.
 //
-// When DEAD does become readable it will mean ONLY "the last ping is
-// older than the heartbeat window." It will NOT mean the machine row was
-// culled, deleted, or deactivated, and it will not mean the seat was
-// released. The server computes the status purely from last_heartbeat_at
+// DEAD does reach callers of this SDK, through the two routes that
+// resolve the machine by *reading* a row rather than writing one:
+// Client.CheckOutMachine (on MachinePayload.Data, after
+// MachineFile.Verify) and Client.GenerateOfflineProof (on the *Machine it
+// returns). Both go through the server's find_by_id, which additionally
+// joins the policy — so the status there is a genuine staleness verdict
+// measured against the real window. Handle DEAD when reading either of
+// those; ignore it on a ping.
+//
+// Wherever it does appear, DEAD means ONLY "the last ping is older than
+// the heartbeat window." It does NOT mean the machine row was culled,
+// deleted, or deactivated, and it does not mean the seat was released. The server computes the status purely from last_heartbeat_at
 // versus the window and never consults the policy's require_heartbeat
 // flag, so a machine reports DEAD *forever* while its row — and its seat
 // — are still there. Culling is a separate background job that
 // early-returns for any policy with require_heartbeat = false, and that
 // column defaults to FALSE: on a default policy nothing is ever culled,
-// whatever HeartbeatCullStrategy says. So even a readable DEAD is not a
-// reason to stop pinging: Client.PingHeartbeat revives the machine
-// whatever state it was in, its update being a bare
+// whatever HeartbeatCullStrategy says. So even a DEAD read off a checkout
+// is not a reason to stop pinging: Client.PingHeartbeat revives the
+// machine whatever state it was in, its update being a bare
 // last_heartbeat_at = NOW() with no resurrection check gating it.
 type HeartbeatStatus string
 

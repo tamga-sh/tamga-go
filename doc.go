@@ -93,18 +93,22 @@
 // WithHeartbeatOnTick. HeartbeatScheduler.Run never inspects the status,
 // and only context cancellation ends its loop.
 //
-// DEAD in particular is not reachable from any call this SDK makes.
-// Client.PingHeartbeat writes last_heartbeat_at = NOW() and then derives
-// the status from that same timestamp, so its response is always ALIVE or
-// RESURRECTED; Client.ResetHeartbeat and Client.CreateMachine both answer
-// NOT_STARTED. DEAD is a real server state, visible only from a machine
-// read this SDK does not expose yet — HeartbeatDead stays modeled for
-// when that lands, but a `case DEAD` branch written against a ping today
-// is dead code.
+// DEAD is not reachable from the heartbeat routes. Client.PingHeartbeat
+// writes last_heartbeat_at = NOW() and then derives the status from that
+// same timestamp, so its response is always ALIVE or RESURRECTED;
+// Client.ResetHeartbeat and Client.CreateMachine both answer NOT_STARTED.
+// A `case DEAD` branch written against a ping is dead code.
 //
-// And even when readable, DEAD would mean only that the last ping is
-// older than the window — never that the row was culled, deleted, or
-// deactivated. The server derives the status from last_heartbeat_at alone
+// It is reachable elsewhere in this SDK: Client.CheckOutMachine surfaces
+// it on MachinePayload.Data after MachineFile.Verify, and
+// Client.GenerateOfflineProof on the *Machine it returns. Both resolve
+// the machine by reading a row rather than writing one and — unlike the
+// heartbeat routes — join the policy, so their HeartbeatStatus and
+// NextHeartbeatAt reflect the real heartbeat_duration rather than the
+// 600s fallback.
+//
+// Wherever it appears, DEAD means only that the last ping is older than
+// the window — never that the row was culled, deleted, or deactivated. The server derives the status from last_heartbeat_at alone
 // and never consults the policy's require_heartbeat flag, and the culling
 // job that would delete the row early-returns unless require_heartbeat is
 // set — which it is not, by default. A machine can therefore report DEAD

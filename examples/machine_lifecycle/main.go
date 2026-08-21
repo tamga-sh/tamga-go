@@ -94,9 +94,10 @@ func main() {
 		// There is deliberately no `case ... == tamga.HeartbeatDead` here.
 		// A ping writes last_heartbeat_at = NOW() and then derives the
 		// status from that same timestamp, so its response is always ALIVE
-		// or RESURRECTED; such a branch would be dead code. DEAD is a real
-		// server state, but it is only visible from a machine read this SDK
-		// does not expose yet.
+		// or RESURRECTED; such a branch would be dead code on this route.
+		// DEAD does reach this SDK — through CheckOutMachine and
+		// GenerateOfflineProof, which read the machine instead of writing
+		// it. Handle it there, not in a heartbeat tick.
 		onTick := func(m *tamga.Machine, tickErr error) {
 			switch {
 			case errors.Is(tickErr, tamga.ErrNotFound):

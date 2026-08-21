@@ -110,17 +110,23 @@ server-internal (analytics storage, edition gating) and don't apply to any SDK.
   (`ErrNotFound`); hang re-activation off that. A `Run` loop that returns or short-circuits on
   any status is a bug, not a safety feature. Do not reintroduce "re-activate rather than retry
   ping" guidance anywhere in this repo.
-- **`DEAD` is NOT reachable from any call this SDK makes — never write docs or samples implying
-  a ping can return it.** `ping-heartbeat` writes `last_heartbeat_at = NOW()` and *then* derives
-  the status from that same timestamp, so its response is always `ALIVE`/`RESURRECTED`;
-  `reset-heartbeat` nulls the column and `POST /machines` never sets it, so both answer
-  `NOT_STARTED`. It is the same "modeled but unreachable" class as the ⛔ `ValidationCode` values
-  below. So: no `case DEAD` branch in any example (dead code), and `machine_test.go`'s three
+- **`DEAD` is route-dependent. Never write that a ping can return it — and never write that it
+  is unreachable from this SDK either.** Both errors have shipped here; the second replaced the
+  first. `ping-heartbeat` writes `last_heartbeat_at = NOW()` and *then* derives the status from
+  that same timestamp, so its response is always `ALIVE`/`RESURRECTED`; `reset-heartbeat` nulls
+  the column and `POST /machines` never sets it, so both answer `NOT_STARTED`. So: no
+  `case DEAD` branch hung off a heartbeat tick (dead code), and `machine_test.go`'s three
   consecutive `DEAD` responses are a **fixture** proving the loop tolerates an unexpected status
-  — not a claim the server produces them. Do **not** delete `HeartbeatDead` or
-  `MachineAttributes.HeartbeatStatus`; both go live the moment a machine-read method
-  (`GET /machines/{id}`, machine list) lands, which is where `DEAD` actually surfaces.
-- **When `DEAD` does become readable it reports staleness, never culling.**
+  — not a claim the server produces them on that route. But `DEAD` **does** reach callers here,
+  through the two routes that resolve the machine via the server's `find_by_id` (a read, not a
+  write): `CheckOutMachine` → `MachineFile.Verify` → `MachinePayload.Data`, and
+  `GenerateOfflineProof`'s returned `*Machine`. Those two also join `policies`, so their
+  `heartbeat_status`/`next_heartbeat_at` use the policy's real window instead of the 600s
+  fallback. This is **not** the "modeled but unreachable" class the ⛔ `ValidationCode` values
+  below belong to — the `HEARTBEAT_DEAD` *validation code* is unreachable, the `DEAD` *heartbeat
+  status* is not. Do **not** delete `HeartbeatDead` or `MachineAttributes.HeartbeatStatus`; both
+  are live today on those two routes.
+- **Wherever `DEAD` appears it reports staleness, never culling.**
   `Machine::heartbeat_status*` computes it from `last_heartbeat_at` versus the window and never
   reads `require_heartbeat`, so a stale machine reports `DEAD` *forever* with its row and its
   seat intact. The culling job early-returns unless the policy sets `require_heartbeat`, and that
