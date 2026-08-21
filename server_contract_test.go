@@ -337,3 +337,84 @@ func TestNew_AppliesADefaultRequestDeadline(t *testing.T) {
 		t.Errorf("DefaultTimeout = %v, want > 30s so it does not race the server's own timeout", DefaultTimeout)
 	}
 }
+
+// recordingTransport counts round trips and delegates to a base
+// RoundTripper, so a test can prove a caller-supplied *http.Client is the
+// one actually sending requests — not merely the one parked on the field.
+type recordingTransport struct {
+	base  http.RoundTripper
+	calls atomic.Int32
+}
+
+func (rt *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.calls.Add(1)
+	return rt.base.RoundTrip(req)
+}
+
+// New installs its own &http.Client{Timeout: DefaultTimeout} BEFORE it
+// applies any Option, and WithHTTPClient then replaces that client
+// wholesale — so a caller's own client wins, carrying their own Timeout,
+// including a deliberate zero (which http.Client documents as "no
+// timeout").
+//
+// That property is the whole contract of WithHTTPClient's "Supplying a
+// client with no Timeout set restores unbounded requests" doc line, and
+// until now nothing pinned it. A later edit to New that "helpfully"
+// backfilled a zero Timeout after the option loop would silently re-impose
+// a 45s deadline on callers who explicitly asked for none — a behavior
+// change invisible to every other test in this package, since none of them
+// exercise WithHTTPClient at all.
+func TestWithHTTPClient_ReplacesTheDefaultClientVerbatim(t *testing.T) {
+	cases := []struct {
+		name    string
+		why     string
+		timeout time.Duration
+	}{
+		{
+			name:    "explicit non-default timeout",
+			why:     "a caller's own timeout must survive New untouched",
+			timeout: 7 * time.Second,
+		},
+		{
+			name:    "deliberate zero timeout",
+			why:     "a zero Timeout means unbounded and must NOT be backfilled with DefaultTimeout",
+			timeout: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", contentTypeJSONAPI)
+				_, _ = w.Write([]byte(`{"data":` + representativeMachineJSON + `}`))
+			}))
+			defer server.Close()
+
+			rt := &recordingTransport{base: http.DefaultTransport}
+			hc := &http.Client{Timeout: tc.timeout, Transport: rt}
+
+			c, err := New("acct-123", WithBaseURL(server.URL), WithLicenseKey("lic-abc"), WithHTTPClient(hc))
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			if c.httpClient != hc {
+				t.Fatalf("httpClient is not the caller's client — WithHTTPClient must install it as-is, never copy or wrap it")
+			}
+			if c.httpClient.Timeout != tc.timeout {
+				t.Errorf("httpClient.Timeout = %v, want %v — %s", c.httpClient.Timeout, tc.timeout, tc.why)
+			}
+			if tc.timeout != DefaultTimeout && c.httpClient.Timeout == DefaultTimeout {
+				t.Errorf("New backfilled DefaultTimeout (%v) onto a caller-supplied client — %s", DefaultTimeout, tc.why)
+			}
+
+			// Field identity alone is not enough: prove the caller's
+			// client is what do() actually sends through.
+			if _, err := c.PingHeartbeat(context.Background(), "mach-id"); err != nil {
+				t.Fatalf("PingHeartbeat() error = %v", err)
+			}
+			if n := rt.calls.Load(); n != 1 {
+				t.Errorf("caller transport round trips = %d, want 1 — the request went through some other client", n)
+			}
+		})
+	}
+}
