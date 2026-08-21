@@ -44,10 +44,13 @@ func main() {
 	}
 	fmt.Printf("ValidateByKey: valid=%v code=%s license_id=%s\n", meta.Valid, meta.Code, license.ID)
 
-	// ValidateByID with a populated Scope: only Product/Policy/User/
-	// Environment are actually enforced server-side today (see Scope's
-	// doc comment in license.go) — Entitlements/Fingerprint/Version/
-	// Checksum are modeled for forward-compatibility only.
+	// ValidateByID with a populated Scope. Product/Policy/User/
+	// Environment/Entitlements/Fingerprint are all enforced server-side;
+	// a fingerprint miss comes back as FINGERPRINT_SCOPE_MISMATCH, which
+	// is what makes this the anti-key-sharing check. Scope.Version and
+	// Scope.Checksum are deprecated and never transmitted — the server
+	// answers 422 SCOPE_NOT_SUPPORTED for them and fails the whole call,
+	// so the SDK drops them. See Scope's doc comment in license.go.
 	scope := &tamga.Scope{
 		Fingerprint: strPtr("this-machine-fingerprint"),
 	}

@@ -94,8 +94,18 @@ func TestValidateByID_FullyPopulatedScope(t *testing.T) {
 	}
 	if scopeBody["product"] != "prod-1" || scopeBody["policy"] != "pol-1" ||
 		scopeBody["user"] != "user-1" || scopeBody["environment"] != "env-1" ||
-		scopeBody["fingerprint"] != "fp-1" || scopeBody["version"] != "1.0.0" || scopeBody["checksum"] != "abc123" {
+		scopeBody["fingerprint"] != "fp-1" {
 		t.Errorf("scope body = %+v", scopeBody)
+	}
+	// version/checksum are set on the Scope above and must NOT reach the
+	// wire: the server answers 422 SCOPE_NOT_SUPPORTED the moment either
+	// appears and fails the whole validate call, so sending them can only
+	// break a request that would otherwise have succeeded.
+	if _, present := scopeBody["version"]; present {
+		t.Errorf("scope.version was sent; it must be dropped (server 422s SCOPE_NOT_SUPPORTED): %+v", scopeBody)
+	}
+	if _, present := scopeBody["checksum"]; present {
+		t.Errorf("scope.checksum was sent; it must be dropped (server 422s SCOPE_NOT_SUPPORTED): %+v", scopeBody)
 	}
 }
 

@@ -122,10 +122,22 @@ type ExpirationStrategy string
 
 // Named ExpirationStrategy values the server documents — see
 // ExpirationStrategy's doc comment; any other wire value is valid too.
+//
+// The strategy decides whether an EXPIRED license can still authenticate
+// at all, which is a coarser question than what a validate call reports.
+// RESTRICT_ACCESS, MAINTAIN_ACCESS, and ALLOW_ACCESS all still
+// authenticate — the license simply validates as
+// ValidationCodeExpired. Only ExpirationRevokeAccess (and any
+// unrecognized value, which the server fails closed on) refuses at the
+// door with 401 LICENSE_EXPIRED, matching ErrLicenseExpired.
 const (
 	ExpirationRestrictAccess ExpirationStrategy = "RESTRICT_ACCESS" // default
 	ExpirationMaintainAccess ExpirationStrategy = "MAINTAIN_ACCESS"
 	ExpirationAllowAccess    ExpirationStrategy = "ALLOW_ACCESS"
+	// ExpirationRevokeAccess is the only strategy under which an expired
+	// license stops authenticating: every request fails 401
+	// LICENSE_EXPIRED (ErrLicenseExpired) instead of reaching validation.
+	ExpirationRevokeAccess ExpirationStrategy = "REVOKE_ACCESS"
 )
 
 // RenewalBasis is a free-text policy field — see ExpirationStrategy's doc
@@ -139,16 +151,38 @@ const (
 	RenewalFromNow    RenewalBasis = "FROM_NOW"
 )
 
-// AuthenticationStrategy is a free-text policy field — see
-// ExpirationStrategy's doc comment for the general rationale.
+// AuthenticationStrategy decides whether a raw license key is accepted as
+// a credential for the licenses under this policy. It is a free-text
+// policy field — see ExpirationStrategy's doc comment for the general
+// rationale.
+//
+// ⚠️ This is a hard precondition for this SDK's default transport, and it
+// is OFF by default. License-key authentication (WithLicenseKey /
+// LicenseKeyAuth) is accepted only under AuthStrategyLicense or
+// AuthStrategyMixed. The column defaults to TOKEN, so on a
+// freshly-created policy every license-key request fails with 401
+// LICENSE_NOT_ALLOWED (ErrLicenseNotAllowed) until an operator switches
+// the policy over.
+//
+// Treat that 401 as a configuration problem, not a transient auth
+// failure: retrying, refreshing, or re-entering the key changes nothing.
 type AuthenticationStrategy string
 
 // Named AuthenticationStrategy values the server documents — see
 // AuthenticationStrategy's doc comment; any other wire value is valid too.
 const (
-	AuthStrategyToken   AuthenticationStrategy = "TOKEN" // default
+	// AuthStrategyToken is the server default. License-key auth is
+	// REFUSED under it — tokens only.
+	AuthStrategyToken AuthenticationStrategy = "TOKEN" // default
+	// AuthStrategyLicense accepts license-key auth.
 	AuthStrategyLicense AuthenticationStrategy = "LICENSE"
-	AuthStrategyMixed   AuthenticationStrategy = "MIXED"
+	// AuthStrategyMixed accepts license-key auth alongside tokens.
+	AuthStrategyMixed AuthenticationStrategy = "MIXED"
+	// AuthStrategyNone behaves exactly like AuthStrategyToken at the
+	// authentication gate: license-key auth is refused with 401
+	// LICENSE_NOT_ALLOWED. The name suggests "no authentication
+	// required"; it does not mean that.
+	AuthStrategyNone AuthenticationStrategy = "NONE"
 )
 
 // Policy is the partial `policies` JSON:API resource attribute set this SDK

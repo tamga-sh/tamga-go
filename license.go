@@ -52,20 +52,77 @@ type LicenseAttributes struct {
 // Every field is optional — nil/omitted means "no constraint, skip this
 // check."
 //
-// Only Product/Policy/User/Environment are actually enforced server-side
-// today; Entitlements/Fingerprint/Version/Checksum are parsed but silently
-// ignored (Tamga API protocol specification §2). Model them here for
-// forward-compatibility, but never advertise them as functioning
-// constraints.
+// Six of the eight fields are enforced server-side:
+//
+//   - Product, Policy, User, Environment — compared against the license's
+//     own relationships.
+//   - Entitlements — a list of entitlement CODEs (the developer-facing
+//     identifier, not the UUIDs attach/detach take). Compared
+//     case-insensitively and de-duplicated, and satisfied by the union of
+//     directly-attached and policy-inherited entitlements. An empty slice
+//     asserts nothing. A miss yields ValidationCodeEntitlementsMissing.
+//   - Fingerprint — matched against ANY machine registered on the
+//     license, regardless of that machine's heartbeat status. This is the
+//     anti-key-sharing check. A miss yields
+//     ValidationCodeFingerprintScopeMismatch.
+//
+// ⚠️ Version and Checksum are NOT enforced and are NOT inert either. The
+// server rejects the whole request with 422 SCOPE_NOT_SUPPORTED the
+// moment either one is present — before running any validation — so the
+// caller gets an *APIError and never sees meta.valid at all. Because
+// setting them can only break a call that would otherwise have worked,
+// this SDK no longer transmits them: both fields are retained for source
+// compatibility and are silently dropped by (Scope).MarshalJSON. Setting
+// them is a no-op; stop setting them.
 type Scope struct {
-	Product      *string  `json:"product,omitempty"`
-	Policy       *string  `json:"policy,omitempty"`
-	User         *string  `json:"user,omitempty"`
-	Environment  *string  `json:"environment,omitempty"`
-	Fingerprint  *string  `json:"fingerprint,omitempty"`
-	Version      *string  `json:"version,omitempty"`
+	Product     *string `json:"product,omitempty"`
+	Policy      *string `json:"policy,omitempty"`
+	User        *string `json:"user,omitempty"`
+	Environment *string `json:"environment,omitempty"`
+	Fingerprint *string `json:"fingerprint,omitempty"`
+	// Version is deprecated and never sent on the wire: the server
+	// answers 422 SCOPE_NOT_SUPPORTED for it and fails the entire
+	// validate call. Retained so existing code still compiles.
+	//
+	// Deprecated: not supported by the server; setting it has no effect.
+	Version *string `json:"version,omitempty"`
+	// Checksum is deprecated and never sent on the wire, for the same
+	// reason as Version.
+	//
+	// Deprecated: not supported by the server; setting it has no effect.
 	Checksum     *string  `json:"checksum,omitempty"`
 	Entitlements []string `json:"entitlements,omitempty"`
+}
+
+// MarshalJSON emits the scope object the server actually accepts, with
+// Version and Checksum omitted no matter what the caller set them to.
+//
+// Dropping them silently is the deliberate choice here. The alternative —
+// transmitting them and letting the request fail — turns a field that
+// used to do nothing into one that breaks the entire validate call with a
+// 422, which is a strictly worse outcome for a caller upgrading a patch
+// release. Callers who need version or checksum enforcement have to do it
+// themselves; the server offers no scope for it.
+func (s Scope) MarshalJSON() ([]byte, error) {
+	// A distinct type is required: marshaling *Scope from inside
+	// Scope.MarshalJSON would recurse forever. `type alias Scope` drops
+	// the method set while keeping the field tags.
+	type alias struct {
+		Product      *string  `json:"product,omitempty"`
+		Policy       *string  `json:"policy,omitempty"`
+		User         *string  `json:"user,omitempty"`
+		Environment  *string  `json:"environment,omitempty"`
+		Fingerprint  *string  `json:"fingerprint,omitempty"`
+		Entitlements []string `json:"entitlements,omitempty"`
+	}
+	return json.Marshal(alias{
+		Product:      s.Product,
+		Policy:       s.Policy,
+		User:         s.User,
+		Environment:  s.Environment,
+		Fingerprint:  s.Fingerprint,
+		Entitlements: s.Entitlements,
+	})
 }
 
 // ValidateByKey validates a license by its raw key.
@@ -86,7 +143,7 @@ func (c *Client) ValidateByKey(ctx context.Context, key string) (*License, *Vali
 // ValidateByIDOptions configures ValidateByID.
 type ValidateByIDOptions struct {
 	// Scope, if set, constrains validation — see Scope's doc comment for
-	// which fields are actually enforced today.
+	// which fields are enforced and why Version/Checksum are never sent.
 	Scope *Scope
 	// SkipTouch, when true, suppresses the last_validated_at update side
 	// effect — useful for polling validity without affecting
@@ -123,6 +180,21 @@ func (c *Client) ValidateByID(ctx context.Context, licenseID string, opts *Valid
 // application/json with a flat {ts, valid, detail, code} body — no "data"
 // envelope (Tamga API protocol specification §1/§2) — decodeFlat
 // implements that special case.
+//
+// ⚠️ This call normally writes last_validated_at as a side effect, but
+// the server SKIPS that write whenever the request carries an Origin
+// header — and the response is byte-identical either way, so the caller
+// cannot tell which happened. This SDK never sets Origin itself, but a
+// proxy, service mesh, or middleware in front of the call can add one,
+// and then quick-validate silently stops recording anything.
+//
+// That silence has teeth: a license with no machines and a NULL
+// last_validated_at reports status INACTIVE forever, and the check-in
+// overdue worker uses the same column as its baseline, so it keeps firing
+// license.check-in-overdue webhooks. CheckIn does not help — it writes
+// last_check_in_at, a different column. If you need the write to be
+// guaranteed, call ValidateByID (with SkipTouch false) instead: the POST
+// route has no Origin branch at all.
 func (c *Client) QuickValidate(ctx context.Context, licenseID string) (*ValidationMeta, error) {
 	path := fmt.Sprintf("/licenses/%s/actions/validate", escapePathSegment(licenseID))
 	meta, err := decodeFlat[ValidationMeta](ctx, c, "GET", path)

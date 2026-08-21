@@ -18,6 +18,27 @@
 //	}
 //	license, meta, err := client.ValidateByKey(context.Background(), "YOUR-LICENSE-KEY")
 //
+// # Authentication
+//
+// Authentication is enforced server-side on every endpoint this package
+// calls. For the default license-key transport there is one precondition
+// that is easy to miss and accounts for most "everything 401s" reports:
+// the license's policy must set authentication_strategy to LICENSE or
+// MIXED. That column defaults to TOKEN, and under TOKEN (or NONE) a raw
+// license key is rejected with 401 LICENSE_NOT_ALLOWED — match it with
+// errors.Is against ErrLicenseNotAllowed. It is a configuration
+// precondition, not a transient failure; retrying will not fix it.
+//
+// Two other 401s come from the same gate: ErrLicenseSuspended (a
+// suspended license never authenticates) and ErrLicenseExpired (an
+// expired license, but only when its policy uses REVOKE_ACCESS — every
+// other expiration strategy still authenticates and reports EXPIRED from
+// a validate call instead).
+//
+// A license key authenticates as a narrower role than a bearer token:
+// Client.ResetHeartbeat and Client.GenerateOfflineProof are role-gated
+// above it and return 403 unconditionally under WithLicenseKey.
+//
 // See the examples/ directory (not part of this package, run individually
 // via `go run ./examples/<name>`) for full runnable programs covering
 // validation, check-in, offline license/machine file verification, the
@@ -46,10 +67,19 @@
 // A 429 response is retried transparently: the server's Retry-After is
 // honored (capped), and otherwise the client falls back to jittered
 // exponential backoff. Auto-retry covers GET plus the validate,
-// validate-key, check-in, check-out, and ping POST actions; resource
-// creation is deliberately excluded, since repeating it can consume a
-// second seat. Tune the budget with WithMaxRetries (default
-// DefaultMaxRetries); passing 0 surfaces the *APIError immediately.
+// validate-key, check-in, check-out, ping, ping-heartbeat, and
+// reset-heartbeat POST actions; resource creation is deliberately
+// excluded, since repeating it can consume a second seat. Tune the budget
+// with WithMaxRetries (default DefaultMaxRetries); passing 0 surfaces the
+// *APIError immediately.
+//
+// # Request deadlines
+//
+// Every request is bounded by DefaultTimeout (45s), deliberately longer
+// than the server's own 30s timeout so a slow call surfaces as the
+// server's 504 — which carries an X-Request-Id — rather than racing it to
+// a local deadline error. WithHTTPClient replaces that client entirely,
+// so a supplied client with no Timeout restores unbounded requests.
 //
 // # File map
 //
@@ -57,7 +87,7 @@
 //   - transport.go          AuthTransport implementations (Bearer/Basic/License/Cookie/query)
 //   - license.go            License resource, ValidateByKey/ByID/QuickValidate, CheckIn
 //   - machine.go            Machine/Component/Process CRUD, heartbeats, schedulers
-//   - validation.go         ValidationCode string enum (24 values, 14 reachable today)
+//   - validation.go         ValidationCode string enum (24 values, 16 reachable today)
 //   - entitlement.go        Entitlement resource, list/get, HasEntitlement(code) helper
 //   - policy.go             LicenseScheme/OverageStrategy/heartbeat enums, Policy resource
 //   - checkout_license.go   .lic file parse/verify (Ed25519 signature + HKDF-derived AES key)

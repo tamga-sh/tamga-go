@@ -25,62 +25,117 @@ type Entitlement struct {
 // Code is the stable, developer-facing identifier — HasEntitlement matches
 // on this field. Name is a display label only and may collide or change
 // independently of Code; never match on it.
+//
+// Inherited reports whether the license holds this entitlement through
+// its policy rather than by a direct attachment. It is only present on
+// the license-scoped list route (ListEntitlements) — account-, policy-,
+// and release-scoped entitlement responses omit the field entirely, which
+// is why it is a *bool: nil means "the server did not say", not false.
+//
+// It gates three things. An inherited entitlement cannot be detached from
+// the license (403 POLICY_ENTITLEMENT); attaching it directly on top is
+// refused with 422 ENTITLEMENT_ALREADY_INHERITED; and GetEntitlement
+// returns 404 for it — see that method's doc comment.
 type EntitlementAttributes struct {
-	Name     string          `json:"name"`
-	Code     string          `json:"code"`
-	Created  string          `json:"created"`
-	Updated  string          `json:"updated"`
-	Metadata json.RawMessage `json:"metadata"`
+	// Inherited leads the struct only to satisfy govet's fieldalignment
+	// check; field order here carries no wire meaning.
+	Inherited *bool           `json:"inherited,omitempty"`
+	Name      string          `json:"name"`
+	Code      string          `json:"code"`
+	Created   string          `json:"created"`
+	Updated   string          `json:"updated"`
+	Metadata  json.RawMessage `json:"metadata"`
 }
 
 // ListOptions is the shared keyset-pagination request shape used by
 // ListComponents and ListEntitlements (Tamga API protocol specification
 // §8/§9).
+//
+// Limit is clamped server-side to 1..100. Leaving it 0 does NOT mean
+// "everything": the server silently falls back to 25 rows, and since
+// these routes emit no page metadata and no links, a caller who did not
+// pick a limit has no way to tell a complete answer from a truncated one.
+// Both list methods therefore send an explicit limit of 100 (the server
+// maximum) when Limit is unset, so the page size is always a known
+// number.
+//
+// ⚠️ After works on ListComponents and is inert on ListEntitlements —
+// see ListEntitlements' doc comment.
 type ListOptions struct {
 	After *string
 	Limit int
 }
 
+// serverMaxPageLimit is the largest page size these keyset list routes
+// accept, and the limit both list methods send when the caller did not
+// choose one. See ListOptions.
+const serverMaxPageLimit = 100
+
+// effectivePageLimit is the page size a list call will actually request:
+// the caller's Limit when they set one, otherwise serverMaxPageLimit
+// rather than the server's silent 25-row default.
+func effectivePageLimit(limit int) int {
+	if limit > 0 {
+		return limit
+	}
+	return serverMaxPageLimit
+}
+
 // EntitlementPage is a single page of ListEntitlements results.
 //
-// NextCursor is set to the last item's ID when a full page (Limit items)
-// was returned, since these endpoints carry no cursor metadata/links of
-// their own — pass it as the next call's ListOptions.After. It is left nil
-// on a short/empty page, signaling there is nothing further to fetch.
+// ⚠️ NextCursor on this type is always nil. It is retained so existing
+// code compiles, but this route cannot be paginated — see
+// ListEntitlements.
 type EntitlementPage struct {
 	NextCursor *string
 	Items      []Entitlement
 }
 
-// ListEntitlements lists a license's entitlements, keyset-paginated.
+// ListEntitlements lists a license's entitlements.
 // GET /v1/accounts/{account_id}/licenses/{license_id}/entitlements.
+//
+// ⚠️ This route is NOT paginated, despite accepting the keyset query
+// parameters. The listing is a union of the license's direct entitlements
+// and the ones inherited from its policy, which a single keyset cursor
+// over one table cannot describe, so the server accepts page[after] for
+// wire compatibility and then ignores it — the same first page comes back
+// forever. A caller who loops "until the page is short" against this
+// route never terminates.
+//
+// Consequently: ListEntitlements never sends page[after] (setting
+// ListOptions.After has no effect here), and the returned
+// EntitlementPage.NextCursor is unconditionally nil. limit is the only
+// bound the server honors, capped at 100.
+//
+// The hard consequence is that a license with more than 100 effective
+// entitlements cannot be enumerated in full through this endpoint at all.
+// Treat a negative result — "this code is not in the list" — as
+// authoritative only below that ceiling.
+//
+// ListComponents is a different story: keyset pagination genuinely works
+// there, and its After is not inert.
 func (c *Client) ListEntitlements(ctx context.Context, licenseID string, opts ListOptions) (*EntitlementPage, error) {
 	path := fmt.Sprintf("/licenses/%s/entitlements", escapePathSegment(licenseID))
 	query := url.Values{}
-	if opts.Limit > 0 {
-		query.Set("limit", strconv.Itoa(opts.Limit))
-	}
-	if opts.After != nil {
-		query.Set("page[after]", *opts.After)
-	}
-	fullPath := path
-	if encoded := query.Encode(); encoded != "" {
-		fullPath += "?" + encoded
-	}
+	query.Set("limit", strconv.Itoa(effectivePageLimit(opts.Limit)))
+	fullPath := path + "?" + query.Encode()
 	items, err := decodeJSONAPI[[]Entitlement](ctx, c, "GET", fullPath, nil)
 	if err != nil {
 		return nil, err
 	}
-	page := &EntitlementPage{Items: items}
-	if opts.Limit > 0 && len(items) == opts.Limit {
-		last := items[len(items)-1].ID
-		page.NextCursor = &last
-	}
-	return page, nil
+	// NextCursor stays nil on purpose: handing back a cursor this route
+	// ignores would invite exactly the loop that never terminates.
+	return &EntitlementPage{Items: items}, nil
 }
 
 // GetEntitlement fetches a single entitlement by ID.
 // GET /v1/accounts/{account_id}/licenses/{license_id}/entitlements/{entitlement_id}.
+//
+// ⚠️ Resolves DIRECT attachments only. The item route joins just the
+// license_entitlements table, so an entitlement that ListEntitlements
+// returned with Inherited true — held through the license's policy —
+// comes back 404 NOT_FOUND here. List-then-get-each is not a valid
+// pattern on this resource; read what you need off the list response.
 func (c *Client) GetEntitlement(ctx context.Context, licenseID, entitlementID string) (*Entitlement, error) {
 	path := fmt.Sprintf("/licenses/%s/entitlements/%s", escapePathSegment(licenseID), escapePathSegment(entitlementID))
 	entitlement, err := decodeJSONAPI[Entitlement](ctx, c, "GET", path, nil)
@@ -141,9 +196,15 @@ func (c *Client) entitlementCacheFor() *entitlementCache {
 // Backed by an in-memory TTL cache (entitlementCacheTTL) of the license's
 // entitlement codes: a call within the TTL of a previous call for the same
 // licenseID reuses the cached set instead of making a second HTTP call.
-// Fetches at most one page (limit 100, the server's own max page size);
-// for licenses with more entitlements than fit on one page, use
-// ListEntitlements directly and paginate.
+//
+// ⚠️ Fetches exactly one page of 100 — the server's max — and that is the
+// most this endpoint can ever return, because the route is not paginable
+// (see ListEntitlements). A false result is therefore authoritative only
+// for licenses holding at most 100 effective entitlements, counting
+// policy-inherited ones. Above that ceiling a genuinely-held code can
+// report false, and there is no server-side way to enumerate the rest.
+// If your product issues more than 100 entitlements to a single license,
+// do not gate features on this method.
 func (c *Client) HasEntitlement(ctx context.Context, licenseID, code string) (bool, error) {
 	cache := c.entitlementCacheFor()
 
@@ -153,7 +214,7 @@ func (c *Client) HasEntitlement(ctx context.Context, licenseID, code string) (bo
 	cache.mu.Unlock()
 
 	if !fresh {
-		page, err := c.ListEntitlements(ctx, licenseID, ListOptions{Limit: 100})
+		page, err := c.ListEntitlements(ctx, licenseID, ListOptions{Limit: serverMaxPageLimit})
 		if err != nil {
 			return false, err
 		}

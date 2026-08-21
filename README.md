@@ -93,7 +93,20 @@ param, but the SDK sends only the transport you configure).
 | Query parameter | `?token=<token>` | `WithAuth(tamga.QueryParamAuth{Token: token})` |
 
 Every request also carries `Tamga-Version` (`DefaultAPIVersion`, overridable with
-`WithAPIVersion`) and, if set, `Tamga-OTP` via `WithOTP`.
+`WithAPIVersion`) and, if set, `Tamga-OTP` via `WithOTP`. Requests are bounded by
+`DefaultTimeout` (45s) unless you supply your own `*http.Client` via `WithHTTPClient`.
+
+> **License-key auth is off by default server-side.** The license's policy must set
+> `authentication_strategy` to `LICENSE` or `MIXED`; the column defaults to `TOKEN`, under which
+> every license-key request fails `401 LICENSE_NOT_ALLOWED` (match with `errors.Is(err,
+> tamga.ErrLicenseNotAllowed)`). That is a configuration precondition, not a transient failure —
+> retrying or re-entering the key will not fix it. Two other 401s come from the same gate:
+> `ErrLicenseSuspended`, and `ErrLicenseExpired` (only when the policy's expiration strategy is
+> `REVOKE_ACCESS`; under the other three an expired license still authenticates and reports
+> `EXPIRED` from a validate call). A license key also authenticates as a narrower role than a
+> bearer token: `ResetHeartbeat` and `GenerateOfflineProof` are role-gated above it and return
+> `403` unconditionally — use a bearer token with an admin/developer/product/environment role
+> for those two.
 
 ## Offline verification
 
@@ -239,10 +252,14 @@ Every claim below is implemented at the cited location.
 - **HTTP 429 is handled client-side.** `client.go::(*Client).do` retries a throttled request
   transparently: `parseRetryAfter` reads `Retry-After` as delta-seconds, `retryDelay` caps it at
   60s and otherwise uses jittered exponential backoff, and `isRetryable` scopes auto-retry to
-  `GET` plus the five safe `POST` actions in `client.go::retryablePOSTSuffixes` — `validate`,
-  `validate-key`, `check-in`, `check-out`, `ping`. Creates are deliberately excluded: retrying
-  `POST /machines` can burn a second seat, and only you know whether that is acceptable. The
-  budget is `DefaultMaxRetries` (3); `WithMaxRetries(0)` hands the `*APIError` straight back.
+  `GET` plus the safe `POST` actions in `client.go::retryablePOSTSuffixes` — `validate`,
+  `validate-key`, `check-in`, `check-out`, `ping`, `ping-heartbeat`, `reset-heartbeat`. Creates
+  are deliberately excluded: retrying `POST /machines` can burn a second seat, and only you know
+  whether that is acceptable. The budget is `DefaultMaxRetries` (3); `WithMaxRetries(0)` hands
+  the `*APIError` straight back. The two heartbeat actions need their own entries because
+  `/actions/ping-heartbeat` does not end in `/actions/ping` (that is the *process* ping) — and a
+  throttled heartbeat that is not retried does not surface as an error, it gets the machine
+  culled.
 - **Every caller-supplied ID is path-escaped before interpolation**
   (`client.go::escapePathSegment`, `client.go::buildURL`), so an ID containing `/`, `?`, or `#`
   cannot redirect a request or inject query parameters.
@@ -259,25 +276,56 @@ Every claim below is implemented at the cited location.
   `(*MachineFile).Verify` enforces the signature and the scheme, not a lifetime. A machine
   file's practical bound is the `ttl` requested at checkout plus the fact that decryption
   requires the target fingerprint.
-- **`Scope.Entitlements`, `Fingerprint`, `Version`, and `Checksum` are sent but not enforced.**
-  The server parses and ignores them today; only `Product`, `Policy`, `User`, and `Environment`
-  constrain validation. They are modeled for forward-compatibility — see `license.go`'s `Scope`
-  doc comment. Do not build product logic on them yet.
-- **10 of the 24 `ValidationCode` values are unreachable against the current server.** Each
+- **`Scope.Version` and `Scope.Checksum` are never sent.** The server rejects the entire
+  validate call with `422 SCOPE_NOT_SUPPORTED` the moment either appears, before running any
+  validation — so setting them could only break a request that would otherwise have worked.
+  `Scope.MarshalJSON` drops both; the fields remain on the struct for source compatibility and
+  are documented `Deprecated`. `Scope.Entitlements` and `Scope.Fingerprint`, by contrast, are
+  now genuinely enforced: entitlements takes entitlement **codes** (case-insensitive,
+  de-duplicated, satisfied by direct or policy-inherited rows; an empty slice asserts nothing),
+  and fingerprint matches any machine on the license regardless of heartbeat status.
+- **8 of the 24 `ValidationCode` values are unreachable against the current server.** Each
   constant in `validation.go` is marked reachable or not; do not branch on a value that cannot
-  come back today.
+  come back today. `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` are reachable now.
+- **`GET /licenses/{id}/entitlements` is not paginable.** The listing unions the license's
+  direct entitlements with the ones inherited from its policy, which a single keyset cursor
+  cannot describe, so the server accepts `page[after]` and ignores it — the same first page
+  comes back forever. `ListEntitlements` never sends `page[after]` and always returns
+  `NextCursor == nil`; a license with more than 100 effective entitlements cannot be enumerated
+  in full. `ListComponents` is unaffected — keyset pagination genuinely works there.
+- **Both list routes silently return 25 rows if no `limit` is sent**, with no page metadata to
+  reveal the truncation. `ListComponents`/`ListEntitlements` send an explicit `limit=100` (the
+  server maximum) when `ListOptions.Limit` is unset.
+- **`Entitlement.Attributes.Inherited`** reports whether the license holds an entitlement
+  through its policy. It is only present on the license-scoped list route, hence `*bool` — `nil`
+  means "the server did not say", not `false`. An inherited entitlement cannot be detached, and
+  `GetEntitlement` returns `404` for it, so list-then-get-each is not a valid pattern here.
+- **`QuickValidate` does not always record the validation.** The server skips the
+  `last_validated_at` write whenever the request carries an `Origin` header, and the response is
+  byte-identical either way. This SDK never sets `Origin`, but a proxy or service mesh can — and
+  a license whose `last_validated_at` stays NULL reports `INACTIVE` and keeps firing
+  check-in-overdue webhooks. Use `ValidateByID` when the write must be guaranteed.
+- **Machine `Memory` and `Disk` are MEGABYTES, not bytes** — on both `MachineAttributes` and
+  `CreateMachineOptions`. Reporting 16 GiB as `17179869184` rather than `16384` inflates the
+  license's memory counter by 1048576× and trips `MEMORY_LIMIT_EXCEEDED` on its next activation.
 - **The machine heartbeat window is a hardcoded 600s**, not driven by the policy's
   `heartbeat_duration` field despite that field existing (`machine.go`, `HeartbeatStatus`).
   `DefaultHeartbeatInterval` is window/3.
-- **`HasEntitlement` fetches at most one page** (100 entitlements, the server's max page size)
-  and caches codes in memory for 60s. For larger entitlement sets, paginate `ListEntitlements`
-  directly.
+- **`HasEntitlement` fetches exactly one page** (100 entitlements, the server's max page size)
+  and caches codes in memory for 60s. That page is also the ceiling — the route cannot be
+  paginated, so a `false` result is authoritative only for licenses holding at most 100
+  effective entitlements. Do not gate features on it above that.
 - **Offline-proof datasets should stick to integers, strings, and typical floats.**
   `serdeCompatMarshal` closes the escaping gaps between Go and the server's JSON encoder, but
   not float formatting at extreme magnitudes (e.g. `1e20`), where the two can pick different
   decimal-vs-scientific cutoffs — see `proof.go::GenerateOfflineProof`.
-- **No auto-update / release-checking API**, and **no RFC 9421 response-signature verification**
-  — neither has a working server-side counterpart, so neither is implemented here.
+- **No auto-update / release-checking API yet.** Earlier revisions of this file said the
+  endpoint 500s on every call; that was wrong. `GET /releases/actions/upgrade` is live and
+  public — it is simply not wrapped by this SDK yet. Artifact download has a route too, but no
+  role currently holds the `artifact.download` permission, so it returns 403 for every real
+  client until that is fixed server-side.
+- **No RFC 9421 response-signature verification** — no API response is ever signed today, so
+  there is nothing to verify.
 
 ## Documentation
 

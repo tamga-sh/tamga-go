@@ -3,6 +3,7 @@ package tamga
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -20,11 +21,19 @@ type Machine struct {
 }
 
 // MachineAttributes is the attribute bag of a Machine resource.
+//
+// ⚠️ Memory and Disk are MEGABYTES, not bytes. The server's `machines`
+// table documents the unit on the column itself, and the same values feed
+// the license's machines_memory_count/machines_disk_count aggregates that
+// MEMORY_LIMIT_EXCEEDED/DISK_LIMIT_EXCEEDED are checked against. Reporting
+// 16 GiB as 17179869184 rather than 16384 inflates those counters by a
+// factor of 1048576 and trips the limit on the license's very next
+// activation.
 type MachineAttributes struct {
 	Platform        *string         `json:"platform"`
 	NextHeartbeatAt *string         `json:"next_heartbeat_at"`
-	Memory          *int64          `json:"memory"`
-	Disk            *int64          `json:"disk"`
+	Memory          *int64          `json:"memory"` // megabytes, not bytes
+	Disk            *int64          `json:"disk"`   // megabytes, not bytes
 	IP              *string         `json:"ip"`
 	Hostname        *string         `json:"hostname"`
 	Cores           *int32          `json:"cores"`
@@ -65,14 +74,18 @@ const machineHeartbeatWindow = 600 * time.Second
 
 // CreateMachineOptions configures CreateMachine. Fingerprint and LicenseID
 // are required; every other field is optional.
+//
+// ⚠️ Memory and Disk are MEGABYTES, not bytes — see MachineAttributes'
+// doc comment for why reporting bytes here corrupts the license's
+// memory/disk counters permanently.
 type CreateMachineOptions struct {
 	Name        *string
 	IP          *string
 	Hostname    *string
 	Platform    *string
 	Cores       *int32
-	Memory      *int64
-	Disk        *int64
+	Memory      *int64 // megabytes, not bytes
+	Disk        *int64 // megabytes, not bytes
 	Metadata    map[string]any
 	Fingerprint string
 	LicenseID   string
@@ -85,11 +98,24 @@ type CreateMachineOptions struct {
 // fingerprint on the same license fails with an error matching
 // ErrFingerprintTaken (via errors.Is).
 //
-// No machine/core/etc. limit is checked at creation time — those limits
-// only surface later via license validation (ValidateByID). The machine
-// row may already exist even if the license is over its limit; the caller
-// is responsible for deleting it if the desired UX is "reject over-limit
-// activation" — see ActivateMachine, which does exactly that.
+// Machine/core/memory/disk limits ARE checked at creation time: the
+// server refuses with a 422 carrying MACHINE_LIMIT_EXCEEDED,
+// CORE_LIMIT_EXCEEDED, MEMORY_LIMIT_EXCEEDED, or DISK_LIMIT_EXCEEDED
+// (match with errors.Is against ErrMachineLimitExceeded and friends).
+// That check runs through the policy's overage strategy, exactly like the
+// one validation runs — so it is NOT a guarantee that a successfully
+// created machine is inside its limits. Under ALLOW_1_25X_OVERAGE (or
+// any of the other permissive strategies) creation succeeds past the
+// nominal max and the overage only surfaces later, as a TOO_MANY_*/
+// TOO_MUCH_* ValidationCode from ValidateByID.
+//
+// Both paths therefore have to be handled to implement "reject
+// over-limit activation" — see ActivateMachine, which does exactly that
+// and normalizes the two vocabularies onto one error.
+//
+// The uniqueness pre-check runs BEFORE the limit checks, so a
+// re-activation of an already-registered fingerprint reports
+// FINGERPRINT_TAKEN rather than a misleading limit error.
 func (c *Client) CreateMachine(ctx context.Context, opts CreateMachineOptions) (*Machine, error) {
 	metadata := opts.Metadata
 	if metadata == nil {
@@ -141,23 +167,71 @@ func isOverageCode(code ValidationCode) bool {
 	}
 }
 
+// createTimeLimitCode maps a create-time 422 error code
+// (MACHINE_LIMIT_EXCEEDED and friends, raised by POST /machines before
+// any row is written) onto the equivalent ValidationCode that the same
+// limit would produce from a validate call.
+//
+// The two vocabularies exist because the checks live in different server
+// modules, but they describe the same four limits. Normalizing here is
+// what lets ActivateMachine hand every caller a single *ValidationMeta
+// shape regardless of which code path caught the overage — a caller
+// switching on meta.Code does not have to learn both spellings.
+//
+// Returns ("", false) for any code that is not a create-time limit
+// refusal, so the caller can fall through and propagate the *APIError
+// unchanged.
+func createTimeLimitCode(code string) (ValidationCode, bool) {
+	switch code {
+	case "MACHINE_LIMIT_EXCEEDED":
+		return ValidationCodeTooManyMachines, true
+	case "CORE_LIMIT_EXCEEDED":
+		return ValidationCodeTooManyCores, true
+	case "MEMORY_LIMIT_EXCEEDED":
+		return ValidationCodeTooMuchMemory, true
+	case "DISK_LIMIT_EXCEEDED":
+		return ValidationCodeTooMuchDisk, true
+	default:
+		return "", false
+	}
+}
+
 // ActivateMachine composes CreateMachine and ValidateByID into the
 // recommended "activate machine" flow: create the machine, then validate
-// its license. If validation returns an over-limit ValidationCode
-// (TOO_MANY_MACHINES/TOO_MANY_CORES/TOO_MUCH_MEMORY/TOO_MUCH_DISK/
-// TOO_MANY_PROCESSES), the just-created machine is deleted before
-// returning — implementing "reject over-limit activation" instead of
-// leaving an orphaned machine row behind (see CreateMachine's doc comment
-// for why creation alone doesn't enforce limits).
+// its license. A policy limit can stop that flow at either step, and
+// ActivateMachine reports both the same way — (nil, meta, err) with err
+// matching ErrMachineOverLimit (via errors.Is), NOT (machine, meta, nil).
 //
-// On that rollback path, ActivateMachine returns (nil, meta, err) with err
-// matching ErrMachineOverLimit (via errors.Is) — NOT (machine, meta, nil).
-// The machine has already been deleted server-side by the time this
-// returns, so branching on the returned machine without first checking err
-// would hand you a stale, deleted machine's ID as if activation had
-// succeeded. meta is still populated so callers that want the exact
+// Step 1 — creation refused (422). The server enforces the machine, core,
+// memory, and disk limits at creation time, so under a strict policy the
+// request never produces a row. ActivateMachine short-circuits here: it
+// normalizes the create-time code onto its ValidationCode equivalent
+// (MACHINE_LIMIT_EXCEEDED → TOO_MANY_MACHINES, CORE_ → TOO_MANY_CORES,
+// MEMORY_ → TOO_MUCH_MEMORY, DISK_ → TOO_MUCH_DISK), synthesizes a
+// *ValidationMeta carrying it, and returns without calling DeleteMachine
+// — there is no row to roll back, and issuing a delete against an ID that
+// was never assigned would be a spurious call at best.
+//
+// Step 2 — creation succeeded, validation reports the overage. The
+// create-time check runs through the policy's overage strategy, so a
+// license under ALLOW_1_25X_OVERAGE (or ALWAYS_ALLOW_OVERAGE) is created
+// past its nominal max and only reports TOO_MANY_MACHINES/TOO_MANY_CORES/
+// TOO_MUCH_MEMORY/TOO_MUCH_DISK/TOO_MANY_PROCESSES from the validate
+// call. Here the machine row does exist, so ActivateMachine deletes it
+// before returning — implementing "reject over-limit activation" instead
+// of leaving an orphaned row behind. This rollback path is unchanged and
+// is still the path a permissive policy takes.
+//
+// In both cases the returned *Machine is nil: branching on it without
+// first checking err would hand you either a machine that was never
+// created or a stale, already-deleted ID, as if activation had succeeded.
+// meta is populated either way so callers that want the exact
 // ValidationCode (to decide messaging, retry policy, etc.) can inspect it
-// despite the error.
+// despite the error. On the step-1 path meta.TS is the local time the
+// refusal was observed, not a server timestamp — no validation ran.
+//
+// Any non-limit create error (FINGERPRINT_TAKEN, a 401, a network
+// failure) propagates unchanged as (nil, nil, err).
 //
 // Deletion failures during rollback are not surfaced beyond that — the
 // ErrMachineOverLimit/meta pair is what the caller most needs; a machine
@@ -166,6 +240,21 @@ func isOverageCode(code ValidationCode) bool {
 func (c *Client) ActivateMachine(ctx context.Context, opts CreateMachineOptions, scope *Scope) (*Machine, *ValidationMeta, error) {
 	machine, err := c.CreateMachine(ctx, opts)
 	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if code, ok := createTimeLimitCode(apiErr.Err.Code); ok {
+				meta := &ValidationMeta{
+					TS:     time.Now().UTC(),
+					Valid:  false,
+					Code:   code,
+					Detail: apiErr.Err.Detail,
+				}
+				// %w twice keeps both the sentinel and the original
+				// *APIError in the chain, so errors.Is matches
+				// ErrMachineOverLimit and ErrMachineLimitExceeded alike.
+				return nil, meta, fmt.Errorf("%w (code=%s): %w", ErrMachineOverLimit, code, apiErr)
+			}
+		}
 		return nil, nil, err
 	}
 
@@ -196,6 +285,20 @@ func (c *Client) PingHeartbeat(ctx context.Context, machineID string) (*Machine,
 // ResetHeartbeat fully rewinds a machine's heartbeat state to
 // NOT_STARTED. POST /v1/accounts/{account_id}/machines/{id}/actions/reset-heartbeat,
 // no body.
+//
+// ⚠️ Not callable with a license key. The server gates this action on the
+// caller's ROLE (admin, developer, product token, or environment token) —
+// not on a permission — and the LicenseToken role is not in that set. A
+// client authenticated with WithLicenseKey therefore gets 403 FORBIDDEN
+// on every call, unconditionally, no matter how the license's policy is
+// configured. Use a BearerAuth token with one of those roles instead.
+//
+// This matters more than the usual "some endpoints need a stronger
+// credential" caveat, because resetting the heartbeat is the only
+// server-side way to unstick a machine whose heartbeat job has wedged. An
+// embedded client that reaches for it as a recovery path finds it is not
+// a recovery path at all. Contrast PingHeartbeat, which is
+// permission-gated with no role gate and works fine with a license key.
 func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine, error) {
 	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/reset-heartbeat", escapePathSegment(machineID)), nil)
 	if err != nil {
@@ -338,25 +441,29 @@ type ComponentPage struct {
 // The response carries no cursor metadata/links of its own — NextCursor is
 // set to the last item's ID when a full page was returned; pass it as the
 // next call's ListOptions.After.
+//
+// Unlike the entitlements listing, page[after] genuinely works here.
+//
+// When ListOptions.Limit is unset, an explicit limit of 100 (the server
+// maximum) is sent rather than letting the server apply its silent
+// 25-row default. Deriving NextCursor requires knowing the page size, and
+// a caller who did not pick one would otherwise get 25 rows, no cursor,
+// and no indication anything was left behind.
 func (c *Client) ListComponents(ctx context.Context, machineID string, opts ListOptions) (*ComponentPage, error) {
 	path := fmt.Sprintf("/machines/%s/components", escapePathSegment(machineID))
+	limit := effectivePageLimit(opts.Limit)
 	query := url.Values{}
-	if opts.Limit > 0 {
-		query.Set("limit", strconv.Itoa(opts.Limit))
-	}
+	query.Set("limit", strconv.Itoa(limit))
 	if opts.After != nil {
 		query.Set("page[after]", *opts.After)
 	}
-	fullPath := path
-	if encoded := query.Encode(); encoded != "" {
-		fullPath += "?" + encoded
-	}
+	fullPath := path + "?" + query.Encode()
 	items, err := decodeJSONAPI[[]Component](ctx, c, "GET", fullPath, nil)
 	if err != nil {
 		return nil, err
 	}
 	page := &ComponentPage{Items: items}
-	if opts.Limit > 0 && len(items) == opts.Limit {
+	if len(items) == limit {
 		last := items[len(items)-1].ID
 		page.NextCursor = &last
 	}

@@ -21,6 +21,15 @@ const ProofPrefix = "v1x0."
 // machine is still valid" without downloading a full offline file.
 // POST /v1/accounts/{account_id}/machines/{id}/actions/generate-offline-proof.
 //
+// ⚠️ Not callable with a license key. Like ResetHeartbeat, the server
+// gates this action on the caller's ROLE rather than on a permission, and
+// the LicenseToken role is not in the allowed set — a client
+// authenticated with WithLicenseKey gets 403 FORBIDDEN on every call
+// regardless of policy configuration, even though that role does hold the
+// machine.proofs.generate permission. Use a BearerAuth token with an
+// admin/developer/product/environment (or sales/support agent) role.
+// VerifyOfflineProof needs no credential at all and is unaffected.
+//
 // dataset, if nil, defaults to {} in the request body — the server
 // requires a JSON object (not an array/scalar), failing with an error
 // matching ErrDatasetInvalid otherwise.

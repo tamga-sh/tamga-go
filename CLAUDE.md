@@ -83,29 +83,66 @@ Pulled from the Tamga API protocol specification's "Known Server-Side Gaps" sect
 items that actually constrain this repo's scope are listed; several gaps there are
 server-internal (analytics storage, edition gating) and don't apply to any SDK.
 
-- **Do not build the auto-update/release-checking feature.** `GET /releases/actions/upgrade`
-  joins a table that doesn't exist and 500s on every real call; even once fixed server-side, it
-  returns no download URL, so a second endpoint would still be needed and doesn't exist. This is
-  a hard non-goal for v1, not a "coming soon" stub — don't scaffold a `releases.go` for it.
+- **The auto-update/release-checking endpoint works.** `GET /releases/actions/upgrade` routes to
+  a live handler; the earlier "joins a table that doesn't exist and 500s" claim in this file was
+  false and was blocking work that is in fact buildable. Real constraints if it gets implemented:
+  the endpoint is public (optional auth); an already-current caller gets `204` with an empty
+  body, so a decoder that assumes JSON breaks; omitting `constraint` defaults to patch-only
+  (`~x.y.z`); omitting `channel` matches **every** channel including alpha/dev; `product` is the
+  product **UUID**, not its code; and a malformed query yields a plain-text `400`, not JSON:API.
+  The artifact download route exists too, but is currently blocked by a server-side permission
+  gap (no role holds `artifact.download`) — don't ship a download method until that is fixed
+  upstream.
 - **429 handling already ships — extend it, don't re-invent it.** `client.go`'s `do()` retries a
   throttled request transparently: `parseRetryAfter` reads `Retry-After` as delta-seconds,
   `retryDelay` caps it at 60s and otherwise falls back to jittered exponential backoff, and
-  `isRetryable` scopes auto-retry to `GET` plus the five safe `POST` actions in
-  `retryablePOSTSuffixes` (`validate`, `validate-key`, `check-in`, `check-out`, `ping`). Creates
-  are deliberately excluded — retrying `POST /machines` can burn a second seat. Budget is
-  `DefaultMaxRetries` (3), overridable with `WithMaxRetries`; `0` hands the `*APIError` straight
-  back to the caller.
-- **Model all 24 `ValidationCode` values, but only 14 are reachable today** (`validation.go`
+  `isRetryable` scopes auto-retry to `GET` plus the safe `POST` actions in
+  `retryablePOSTSuffixes` (`validate`, `validate-key`, `check-in`, `check-out`, `ping`,
+  `ping-heartbeat`, `reset-heartbeat`). Creates are deliberately excluded — retrying
+  `POST /machines` can burn a second seat. Budget is `DefaultMaxRetries` (3), overridable with
+  `WithMaxRetries`; `0` hands the `*APIError` straight back to the caller. **`ping-heartbeat`
+  must stay in that list**: it does not end in `/actions/ping` (that suffix is the *process*
+  ping), the rate limiter buckets per route pattern so a whole fleet shares one bucket here, and
+  a silently-dropped heartbeat gets the machine culled rather than surfacing as a visible error.
+- **Model all 24 `ValidationCode` values, but only 16 are reachable today** (`validation.go`
   already encodes this — see its doc comment for the exact split). Do not write example code or
-  documentation implying `BANNED`, `ENTITLEMENTS_MISSING`, `HEARTBEAT_DEAD`, or the other ⛔
-  values can come back from a live call — they can't, yet.
-- **`Scope.Entitlements`/`Fingerprint`/`Version`/`Checksum` are parsed but silently ignored
-  server-side.** Model them on the `Scope` struct for forward-compatibility (they're in the
-  wire format), but never advertise them in docs/examples as functioning constraints — a caller
-  who sets `Scope.Version` today gets no enforcement and no error telling them so.
-- **Auth is not enforced on license or machine endpoints server-side.** Still always send
-  `Authorization: License <key>` (the SDK's default transport) — this is forward-compatible with
-  enforcement landing later, and costs nothing today since nothing checks it.
+  documentation implying `BANNED`, `HEARTBEAT_DEAD`, or the other ⛔ values can come back from a
+  live call — they can't, yet. `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` are no
+  longer in that set; both are reachable now.
+- **`Scope.Entitlements` and `Scope.Fingerprint` ARE enforced; `Scope.Version`/`Checksum` are
+  worse than ignored.** Entitlements takes entitlement **codes** (not the UUIDs attach/detach
+  use), compared case-insensitively and de-duplicated, satisfied by direct *or* policy-inherited
+  rows; an empty slice asserts nothing. Fingerprint matches any machine on the license
+  regardless of heartbeat status. Version/Checksum, however, make the server reject the entire
+  validate call with `422 SCOPE_NOT_SUPPORTED` before validation runs — `Scope.MarshalJSON`
+  therefore drops both, and they are kept on the struct for source compatibility only. Do not
+  re-add them to the serializer.
+- **Auth IS enforced, and license-key auth is off by default.** The policy's
+  `authentication_strategy` column defaults to `TOKEN`, and a raw license key is only accepted
+  under `LICENSE` or `MIXED` — otherwise every request 401s with `LICENSE_NOT_ALLOWED`
+  (`ErrLicenseNotAllowed`). Treat that as a configuration precondition, not a retryable failure.
+  Two sibling 401s come from the same gate: `LICENSE_SUSPENDED`, and `LICENSE_EXPIRED` (only
+  under the `REVOKE_ACCESS` expiration strategy — the other three still authenticate and report
+  `EXPIRED` from a validate call instead). A license key also authenticates as a narrower role
+  than a bearer token: `ResetHeartbeat` and `GenerateOfflineProof` are **role**-gated above it
+  and return 403 unconditionally.
+- **Machine `memory`/`disk` are MEGABYTES, not bytes.** Both the resource attributes and
+  `CreateMachineOptions`. Reporting 16 GiB as `17179869184` instead of `16384` inflates the
+  license's `machines_memory_count` by 1048576× and trips `MEMORY_LIMIT_EXCEEDED` on the next
+  activation against that license.
+- **`GET /licenses/{id}/entitlements` cannot be paginated.** The listing unions direct and
+  policy-inherited rows, so the server accepts `page[after]` for wire compatibility and ignores
+  it — looping "until the page is short" never terminates. `ListEntitlements` therefore never
+  sends `page[after]` and always returns `NextCursor == nil`; a license with >100 effective
+  entitlements cannot be enumerated in full, so `HasEntitlement`'s `false` is only authoritative
+  below that ceiling. `/machines/{id}/components` is different — keyset pagination genuinely
+  works there, don't "fix" it to match.
+- **Both list routes default to 25 rows when no `limit` is sent**, with no page metadata and no
+  links to reveal the truncation. `ListComponents`/`ListEntitlements` send an explicit
+  `limit=100` (`serverMaxPageLimit`) when `ListOptions.Limit` is unset.
+- **`QuickValidate` skips its `last_validated_at` write when the request carries `Origin`**, and
+  the response is identical either way. This SDK never sets `Origin`, but a proxy can; if the
+  write must be guaranteed, use `ValidateByID`, whose POST route has no `Origin` branch.
 - **Policy `overage_strategy`/`heartbeat_resurrection_strategy` defaults are not real enum
   values.** Freshly created policies default to `"DENY_ACCESS"` / `"NO_RESURRECTION"` — neither
   matches a real `OverageStrategy`/`HeartbeatResurrectionStrategy` variant. The

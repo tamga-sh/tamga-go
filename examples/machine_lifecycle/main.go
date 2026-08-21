@@ -57,21 +57,26 @@ func main() {
 	}
 	ctx := context.Background()
 
-	// ActivateMachine composes CreateMachine + ValidateByID, deleting the
-	// just-created machine again if validation comes back over-limit
-	// (TOO_MANY_MACHINES/TOO_MANY_CORES/etc.) — see machine.go's doc
-	// comment for why creation alone never enforces limits. On that
-	// rollback path it returns a nil *Machine and an error matching
-	// ErrMachineOverLimit — the machine has already been deleted
-	// server-side by the time it returns, so check err before touching
-	// the returned machine.
+	// ActivateMachine composes CreateMachine + ValidateByID. A policy
+	// limit can stop it at either step and both are reported the same
+	// way — a nil *Machine plus an error matching ErrMachineOverLimit,
+	// with meta carrying the exact code:
+	//
+	//   - Under a strict policy the server refuses creation outright
+	//     (422 MACHINE_LIMIT_EXCEEDED and friends); no row exists, so
+	//     nothing is rolled back.
+	//   - Under an overage strategy creation succeeds and the limit only
+	//     surfaces at validate; ActivateMachine deletes the row it just
+	//     created before returning.
+	//
+	// Either way, check err before touching the returned machine.
 	machine, meta, err := client.ActivateMachine(ctx, tamga.CreateMachineOptions{
 		Fingerprint: *fingerprint,
 		LicenseID:   *licenseID,
 	}, nil)
 	if err != nil {
 		if errors.Is(err, tamga.ErrMachineOverLimit) {
-			log.Fatalf("activation rejected (code=%s) — the over-limit machine row has already been rolled back", meta.Code)
+			log.Fatalf("activation rejected: over policy limit (code=%s); no machine is registered", meta.Code)
 		}
 		log.Fatalf("ActivateMachine: %v", err)
 	}

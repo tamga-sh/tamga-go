@@ -73,6 +73,25 @@ func (a BasicAuth) Apply(req *http.Request) {
 // transport for embedded/client SDKs validating against a raw license key,
 // and this SDK's own default (see New in client.go), independent of the
 // server's Bearer-first try-order.
+//
+// ⚠️ Authentication IS enforced, and this transport is conditional on
+// server-side configuration. Three things can refuse the key before any
+// handler runs, all as a 401:
+//
+//   - The policy's authentication_strategy must be LICENSE or MIXED.
+//     It defaults to TOKEN, under which every request fails
+//     LICENSE_NOT_ALLOWED (ErrLicenseNotAllowed). This is the one to
+//     check first when a brand-new integration 401s on every call.
+//   - A suspended license never authenticates: LICENSE_SUSPENDED
+//     (ErrLicenseSuspended).
+//   - An expired license authenticates under every expiration strategy
+//     except REVOKE_ACCESS, which answers LICENSE_EXPIRED
+//     (ErrLicenseExpired).
+//
+// Past that gate, a license key authenticates as the LicenseToken role,
+// which is narrower than a bearer token: ResetHeartbeat and
+// GenerateOfflineProof are role-gated above it and always 403 — see their
+// doc comments.
 type LicenseKeyAuth struct {
 	Key string
 }

@@ -49,9 +49,31 @@ func WithBaseURL(baseURL string) Option {
 	}
 }
 
+// DefaultTimeout bounds every request this SDK sends, unless the caller
+// supplies their own *http.Client via WithHTTPClient.
+//
+// It is deliberately longer than the server's own 30s request timeout.
+// Matching that number exactly is the worst choice available: the two
+// deadlines race, and a slow request usually surfaces as a local
+// context-deadline error instead of the server's 504 — which carries an
+// X-Request-Id, the one correlation handle support actually needs to
+// explain why the request was slow. 45s leaves the server enough room to
+// answer first while still bounding the call.
+//
+// Without any deadline (this SDK's previous behavior — http.DefaultClient
+// has none) a request against a black-holed connection hangs until the
+// OS gives up, which for a heartbeat scheduler means a ticker goroutine
+// parked indefinitely and a machine that quietly stops pinging. Passing a
+// per-call context.WithTimeout still works and still wins if it is
+// shorter; this is the backstop for callers who pass context.Background().
+const DefaultTimeout = 45 * time.Second
+
 // WithHTTPClient overrides the default *http.Client used to send requests
-// (http.DefaultClient's zero value otherwise). Useful for custom timeouts,
-// transports, or test doubles.
+// (an http.Client with DefaultTimeout otherwise). Useful for custom
+// timeouts, transports, or test doubles.
+//
+// Supplying a client with no Timeout set restores unbounded requests —
+// bound them with a per-call context.WithTimeout if that is intentional.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) { c.httpClient = hc }
 }
@@ -104,7 +126,7 @@ func New(accountID string, opts ...Option) (*Client, error) {
 	c := &Client{
 		accountID:  accountID,
 		baseURL:    defaultBaseURL,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: DefaultTimeout},
 		apiVersion: DefaultAPIVersion,
 		maxRetries: DefaultMaxRetries,
 	}
@@ -255,12 +277,27 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 // and they are precisely the calls a client makes on a timer. Creates are
 // deliberately absent: retrying POST /machines risks a second activation
 // burning a second seat, and only the caller knows whether that is acceptable.
+//
+// ⚠️ "/actions/ping" is the PROCESS ping; the machine heartbeat lives at
+// "/actions/ping-heartbeat", which does not end in "/actions/ping" and so
+// needs its own entry. Leaving it out was not a safety decision, it was a
+// suffix-matching accident, and it is the worst possible one to make: the
+// rate limiter buckets by (caller, route pattern) and by default treats
+// every caller behind an untrusted proxy as the same key, so an entire
+// fleet shares one bucket on this route and throttles itself. A dropped
+// heartbeat is not a retried request the caller can see fail — it is a
+// machine that stops pinging and gets culled. Both this and
+// "/actions/reset-heartbeat" are bare `last_heartbeat_at = NOW()`-class
+// state writes with no counter to double-increment, so repeating them is
+// unconditionally safe.
 var retryablePOSTSuffixes = []string{
 	"/actions/validate",
 	"/actions/validate-key",
 	"/actions/check-in",
 	"/actions/check-out",
 	"/actions/ping",
+	"/actions/ping-heartbeat",
+	"/actions/reset-heartbeat",
 }
 
 func isRetryable(method, path string) bool {
