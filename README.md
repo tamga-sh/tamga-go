@@ -137,6 +137,11 @@ the machine lifecycle, and entitlement checks — `go run ./examples/validate -h
 | `GetPolicy(id)` | `GET /policies/{id}` | Needs `policy.read`; **403s under a license key**. |
 | `HeartbeatIntervalForLicense(id)` | — | The policy's window / 3, ready for `NewHeartbeatScheduler`. |
 | `CheckUpgrade(opts)` | `GET /releases/actions/upgrade` | Four required query params; `offered == false` is **not** "up to date". |
+| `ListReleaseArtifacts(releaseID, opts)` | `GET /releases/{id}/artifacts` | Keyset. Does **not** apply the release read gate — listing an artifact is not evidence it can be downloaded. |
+| `GetArtifact(id)` | `GET /artifacts/{id}` | Metadata only; `RedirectURL` is always nil here. |
+| `ArtifactDownloadURL(id, opts)` | `GET /artifacts/{id}/actions/download` | Sends `?redirect=false` and never follows a redirect. Returns the presigned URL. |
+| `DownloadArtifact(id, opts)` | — | The URL above, fetched from storage with **no** credentials attached. |
+| `CanonicalFingerprint(components...)` | — | Pure function. Canonicalises caller-chosen components into a stable fingerprint. |
 | `Health()` | `GET /v1/health` | Sent with **no credential** and no account prefix; flat body, not JSON:API. |
 
 Re-activating a machine that is already registered is a `409 FINGERPRINT_TAKEN` from
@@ -155,6 +160,94 @@ resolved: adopting that row would attach the caller to a seat its license does n
 machine resource carries no `license_id` with which it could ever notice. Unlike
 `ActivateMachine`, an over-limit verdict on the recovery path does **not** delete the machine —
 it was already there.
+
+## Machine fingerprints
+
+The server stores `fingerprint TEXT NOT NULL` — no length limit, no `CHECK`, no normalisation —
+unique per `(license_id, fingerprint)`. Sent raw, `"ABC-123"`, `"abc-123"` and `" ABC-123 "` are
+three machines holding three seats against the same policy limit. Every Tamga SDK used to send
+the caller's string byte-for-byte, this one included.
+
+`CanonicalFingerprint` is a pure function that turns caller-chosen, labelled components into a
+stable 64-character hex digest:
+
+```go
+fp, err := tamga.CanonicalFingerprint(
+    tamga.FingerprintComponent{Label: "machine-id", Value: machineID},
+    tamga.FingerprintComponent{Label: "disk", Value: diskSerial},
+)
+if err != nil {
+    return err // errors.Is(err, tamga.ErrInvalidFingerprintComponent)
+}
+machine, meta, err := client.ActivateMachine(ctx, tamga.CreateMachineOptions{
+    LicenseID:   licenseID,
+    Fingerprint: fp,
+}, nil)
+```
+
+Component order does not matter, leading and trailing ASCII whitespace is trimmed, and case is
+**preserved** — lowercasing a base64 or hex identifier corrupts it, so `"ABC123"` and `"abc123"`
+are deliberately different machines.
+
+**It reads no hardware identifiers, and it never will.** What identifies a machine is a product
+decision: a cloned VM template shares its board and disk serials, a container has none, and a
+replaced motherboard changes them. No default is right for both a desktop application and a
+Kubernetes sidecar, and eight SDKs each guessing would disagree silently — which is
+double-billing, not a warning. Choose the components yourself.
+
+Values are **not** Unicode-normalised, and that is a constraint rather than an oversight: NFC
+needs a new dependency in Go and Rust and ICU or hand-rolled tables in C11, and a rule the eight
+ports cannot implement identically would yield two fingerprints for one machine depending on
+which SDK the application was written in. Normalise before calling if your values can arrive in
+more than one form.
+
+Invalid input is an **error**, never a silent repair — an empty or repeated label, a non-ASCII
+or `=`-bearing label, a control character in a value, or no components at all. Stripping a
+control character or deduplicating a repeated label would map two different inputs onto one
+canonical string, and therefore two machines onto one seat, which is the bug the function exists
+to prevent.
+
+The algorithm is pinned by [`testdata/fingerprint-vectors.json`](testdata/fingerprint-vectors.json),
+a cross-SDK vector set produced by an independent SHA-256 implementation — not by any SDK — so a
+port cannot pass merely by agreeing with itself.
+
+## Artifacts
+
+Once `CheckUpgrade` reports that a newer release is available, the artifacts are its uploaded
+files:
+
+```go
+page, err := client.ListReleaseArtifacts(ctx, release.ID, tamga.ListOptions{})
+artifact, err := client.GetArtifact(ctx, page.Items[0].ID)
+
+body, err := client.DownloadArtifact(ctx, artifact.ID, tamga.DownloadArtifactOptions{
+    TTL: 10 * time.Minute, // optional; [1 minute, 1 week]
+})
+defer body.Close()
+```
+
+**Do not follow the download redirect yourself.** `GET /artifacts/{id}/actions/download` answers
+`303 See Other` pointing at a short-lived presigned storage URL, and an HTTP client that follows
+it can carry the request's `Authorization` header — your raw license key — to a host that is not
+the Tamga API. Go's standard library drops `Authorization` only when the redirect leaves the
+original *domain*, and still forwards it to a subdomain; every other header, `Tamga-OTP`
+included, is forwarded unconditionally. `ArtifactDownloadURL` sends `?redirect=false` **and**
+routes the request through a redirect-suppressing copy of the configured HTTP client, so a
+server or proxy that redirects anyway cannot cause one to be followed. `DownloadArtifact` then
+fetches the returned URL with no credentials at all.
+
+Nothing in that path authenticates the bytes. Verify the download against
+`ArtifactAttributes.Checksum` before installing or executing anything.
+
+A `403` from the download action is **not** necessarily an auth misconfiguration: the handler
+enforces the owning release's read gate as well as the `artifact.download` permission, so a
+`CLOSED` release's binary is refused even to a caller that holds it — and the same artifact is
+still visible through `ListReleaseArtifacts` and `GetArtifact`, which do not apply that gate.
+
+`ArtifactAttributes` carries the same two-rules-at-once serialization trap as
+`ReleaseAttributes`: the struct is camelCased, so `redirect_url` is `redirectUrl` on the wire,
+but `created_at`/`updated_at` carry explicit per-field renames that override it and arrive as
+the bare `created` and `updated`. Applying either rule uniformly breaks the other half.
 
 ## Auth transports
 
@@ -287,6 +380,72 @@ SEC1 point (`0x04 || X || Y`) that no `crypto/x509` entry point can read; an RSA
 PKCS#1 `RSAPublicKey` DER (270 bytes) or SPKI (294 bytes) depending on the endpoint that served
 it; an Ed25519 key is the raw 32 bytes. `examples/checkout_machine/main.go::parsePublicKey`
 handles all four cases and is the copy-paste source.
+
+### Key rotation (`VerifyWithKeySet`)
+
+When an account rotates its Ed25519 signing key, a file signed **before** the rotation is still
+authentic — but against the single current key it fails with `ErrInvalidSignature`, the same
+error a forgery produces. A paying customer gets locked out and the error points support at the
+wrong problem.
+
+`VerifyWithKeySet` verifies against every key the account has ever held, so the two outcomes stop
+being the same error:
+
+```go
+// One call, cacheable for the life of the process: a rotation adds a key,
+// it never invalidates the ones already there.
+keys, err := client.GetSigningKeySet(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+
+verified, err := file.VerifyWithKeySet(keys, licenseKey)
+
+var unknownKey *tamga.UnknownSigningKeyError
+switch {
+case err == nil:
+	if verified.Key.IsRetired() {
+		// Authentic, and issued before the last rotation. Nothing is wrong
+		// with it — but this client is due a fresh checkout.
+		log.Printf("verified under retired key %s", verified.Key.ID)
+	}
+	fmt.Println(verified.Payload.Data.Attributes.Status)
+
+case errors.Is(err, tamga.ErrUnknownSigningKey):
+	// NOT a forgery. The file names a key this set does not hold, which is
+	// what a genuine pre-rotation file looks like against a stale set.
+	errors.As(err, &unknownKey)
+	log.Printf("stale key set: file names %s, we hold %v", unknownKey.KeyID, unknownKey.Available)
+
+case errors.Is(err, tamga.ErrSigningKeyNotPublished):
+	// The account that signed this has published no Ed25519 key at all, so
+	// it signed with the id of the empty string. Refreshing cannot fix it.
+	log.Print("server published no signing key; an operator must rotate one in")
+
+case errors.Is(err, tamga.ErrInvalidSignature):
+	// The key it names IS in the set and rejects these bytes. Refuse it.
+	log.Print("tampered file")
+}
+```
+
+`(*MachineFile).VerifyWithKeySet` takes the same set alongside the scheme, license key and
+fingerprint.
+
+**Reading the key set without the API.** `GET /signing-keys` authorizes on `account.read`, which
+a license-key credential does not hold — an embedded client gets `403` there unconditionally.
+Pin the public keys in your binary instead:
+
+```go
+keys, err := tamga.NewSigningKeySetFromPublicKeys(currentPubKeyB64, previousPubKeyB64)
+```
+
+That path is strict on purpose: a mistyped key fails at startup rather than reporting every
+genuine file in the field as signed by an unknown key. `tamga.KeyID(publicKeyB64)` computes the
+`kid` a file signed with that key will name — note it hashes the **base64 string**, never the 32
+decoded bytes.
+
+Both existing entry points are untouched: `Verify` keeps its exact signature and behaviour and
+remains the right call when you hold one key and know it.
 
 ### Offline proofs
 
@@ -512,9 +671,14 @@ Every claim below is implemented at the cited location.
   therefore returns `(release, offered, error)`; report `offered == false` as "no update is
   available to you", never as "you are on the latest version". A suspended license is the one
   explicit refusal — `403`, checked before the `204` branch is reached.
-- **Artifact download is still not wrapped.** The route exists, but no role currently holds the
-  `artifact.download` permission, so it returns 403 for every real client until that is fixed
-  server-side.
+- **Artifact publishing is out of scope; artifact *download* no longer is.** This bullet used to
+  say the download route returned 403 for every real client because no role held
+  `artifact.download`. That was true when it was measured and is not true now: the server granted
+  `artifact.read` and `artifact.download` to the license-token role and routed a real handler, so
+  `ListReleaseArtifacts`, `GetArtifact`, `ArtifactDownloadURL` and `DownloadArtifact` all work
+  under a license key. `artifact.create`/`update`/`delete` are still absent from that role, so
+  creating, updating, deleting and uploading an artifact remain unwrapped — those are
+  build-pipeline calls made with a product or environment token.
 - **A machine's `group` and `owner` sub-resources are not wrapped either.**
   `GET|PATCH /machines/{id}/{group,owner}` return `groups` and `users` resource types this SDK
   does not model, and reassigning a machine's owner or group is an admin-console concern rather

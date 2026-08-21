@@ -229,6 +229,17 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 // without backoff one throttled request becomes a sustained burst that keeps
 // the bucket empty and the client never recovers on its own.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	return c.doWith(c.httpClient, req)
+}
+
+// doWith is do with an explicit *http.Client, so a caller that must not
+// follow redirects can hand in a redirect-suppressing copy of the
+// configured client without mutating the caller's own client (see
+// noRedirectClient and ArtifactDownloadURL). Everything else — the 429
+// retry budget, the body buffering that makes a replay possible — is
+// identical, because a throttled download-URL request needs backing off
+// exactly as much as any other.
+func (c *Client) doWith(hc *http.Client, req *http.Request) (*http.Response, error) {
 	retryable := isRetryable(req.Method, req.URL.Path)
 
 	// Buffer the body once so the request can actually be replayed; an
@@ -247,7 +258,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 			req.Body = io.NopCloser(bytes.NewReader(body))
 		}
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := hc.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("tamga: request failed: %w", err)
 		}
@@ -269,6 +280,33 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		case <-time.After(delay):
 		}
 	}
+}
+
+// noRedirectClient is the configured *http.Client with redirect-following
+// switched off, for the one route that answers a redirect carrying a
+// credential-free storage URL.
+//
+// The Go standard library does strip Authorization when a redirect crosses
+// to a different domain (net/http's shouldCopyHeaderOnRedirect), but it
+// forwards it to a subdomain of the original host and, either way, forwards
+// every other header verbatim — Tamga-OTP included. A presigned URL served
+// from a subdomain of the API host would therefore receive the license key,
+// and one served from anywhere would receive the OTP. Neither is acceptable,
+// and a presigned S3-style URL commonly rejects a request carrying its own
+// Authorization header anyway, so following the redirect is not even the
+// working path.
+//
+// http.Client is copied by value on purpose: its fields (Transport, Jar,
+// Timeout) are configuration, and the connection state lives in the
+// Transport, which is shared by the copy rather than duplicated. Mutating
+// c.httpClient.CheckRedirect instead would reach into a client the caller
+// may have supplied via WithHTTPClient and may be using elsewhere.
+func (c *Client) noRedirectClient() *http.Client {
+	hc := *c.httpClient
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &hc
 }
 
 // retryablePOSTSuffixes are the POST paths safe to repeat after a 429.

@@ -39,6 +39,37 @@
 // Client.ResetHeartbeat and Client.GenerateOfflineProof are role-gated
 // above it and return 403 unconditionally under WithLicenseKey.
 //
+// # Machine fingerprints
+//
+// The server stores a fingerprint verbatim — no length limit, no CHECK, no
+// normalisation — and its uniqueness constraint is over the raw bytes, per
+// license. So "ABC-123", "abc-123" and " ABC-123 " are three machines
+// holding three seats against the same policy limit. CanonicalFingerprint
+// takes caller-chosen labelled components and returns a stable 64-character
+// hex digest that collapses the whitespace variants and makes the caller's
+// component order irrelevant, while deliberately preserving case.
+//
+// It reads no hardware identifiers, and that is not an omission: what
+// identifies a machine is a product decision. A cloned VM template shares
+// its board and disk serials, a container has none, and a replaced
+// motherboard changes them — no default is right for both a desktop
+// application and a Kubernetes sidecar. Choose the components, then pass
+// them in.
+//
+// # Artifacts
+//
+// Once CheckUpgrade reports a newer release, ListReleaseArtifacts and
+// GetArtifact describe its uploaded files and DownloadArtifact fetches the
+// bytes. The download route answers a 303 redirect to a short-lived
+// presigned storage URL by default; this package never lets that redirect
+// be followed, because the redirected request can carry the raw license key
+// to a host that is not the Tamga API. See ArtifactDownloadURL.
+//
+// A license key can read and download artifacts but not create, update or
+// delete them — publishing a build is a pipeline concern carried out with a
+// product or environment token, and those routes are deliberately not
+// wrapped here.
+//
 // See the examples/ directory (not part of this package, run individually
 // via `go run ./examples/<name>`) for full runnable programs covering
 // validation, check-in, offline license/machine file verification, the
@@ -189,9 +220,13 @@
 //   - policy.go             LicenseScheme/OverageStrategy/heartbeat enums, Policy resource
 //   - policy_read.go        Policy/license reads, policy-derived heartbeat window
 //   - release.go            Release resource and the auto-update check
+//   - artifact.go           Artifact resource, list/get, presigned download URL
+//   - fingerprint.go        CanonicalFingerprint — stable machine fingerprints
 //   - health.go             Unauthenticated /v1/health probe
 //   - checkout_license.go   .lic file parse/verify (Ed25519 signature + HKDF-derived AES key)
 //   - checkout_machine.go   .machine file parse/verify (multi-scheme signature + HKDF key)
+//   - signing_key.go        Published signing keys, kid derivation, SigningKeySet
+//   - checkout_key_set.go   Rotation-aware VerifyWithKeySet for .lic and .machine files
 //   - proof.go              Offline proof generate/verify (RSA, byte-exact JSON serialization)
 //   - errors.go             JSON:API error model, APIError with Is()/As() code matching
 //
