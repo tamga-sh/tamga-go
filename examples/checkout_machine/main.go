@@ -23,6 +23,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -72,11 +73,23 @@ func main() {
 		licenseKeyForDecrypt, fingerprintForDecrypt = *key, *fingerprint
 	}
 	payload, err := file.Verify(scheme, pubKey, licenseKeyForDecrypt, fingerprintForDecrypt)
+
+	// A machine file's signed exp is enforced, so "expired" has to be told
+	// apart from "forged" — the first means check out a fresh file, the
+	// second means something is wrong. Set file.Now to a server-supplied
+	// timestamp if you do not want to trust this machine's clock.
+	var expired *tamga.ExpiredError
+	if errors.As(err, &expired) {
+		log.Fatalf("this .machine file expired at unix %d — check out a fresh one", expired.ExpiresAt)
+	}
 	if err != nil {
 		log.Fatalf("Verify: %v (is -scheme/-pubkey correct for this account's license, and -encrypt/-fingerprint set correctly?)", err)
 	}
-	fmt.Printf("verified offline: machine fingerprint=%s heartbeat_status=%s\n",
-		payload.Data.Attributes.Fingerprint, payload.Data.Attributes.HeartbeatStatus)
+	// Claims.ExpiresAt is 0 when the checkout carried no ttl: that file
+	// genuinely never expires, and its absence is not an error.
+	fmt.Printf("verified offline: machine fingerprint=%s heartbeat_status=%s exp=%d jti=%s\n",
+		payload.Data.Attributes.Fingerprint, payload.Data.Attributes.HeartbeatStatus,
+		payload.Claims.ExpiresAt, payload.Claims.ID)
 }
 
 // parsePublicKey decodes -pubkey per -scheme's documented wire format
