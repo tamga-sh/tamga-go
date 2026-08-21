@@ -244,6 +244,28 @@ func TestHeartbeatStatus_JSONRoundTripIncludingUnknown(t *testing.T) {
 	}
 }
 
+// tickEvery lowers a scheduler's interval past the one-second floor
+// NewHeartbeatScheduler enforces on its caller, so that a test whose
+// subject is the *loop* can observe several ticks in milliseconds instead
+// of spending a second per tick.
+//
+// This is legitimate precisely because the floor is a guard on the
+// constructor's argument — the number a caller supplies, and gets wrong by
+// converting seconds to a Duration by hand — and not an invariant Run
+// rechecks. Any test whose subject is the floor itself must go through the
+// constructor instead; TestNewHeartbeatScheduler_FloorsASubSecondInterval
+// and TestNewProcessHeartbeatScheduler_FloorsASubSecondInterval do.
+func tickEvery(s *HeartbeatScheduler, d time.Duration) *HeartbeatScheduler {
+	s.interval = d
+	return s
+}
+
+// tickEveryProcess is tickEvery for a ProcessHeartbeatScheduler.
+func tickEveryProcess(s *ProcessHeartbeatScheduler, d time.Duration) *ProcessHeartbeatScheduler {
+	s.interval = d
+	return s
+}
+
 func TestHeartbeatScheduler_TicksAndStopsOnCancel(t *testing.T) {
 	var ticks int
 	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -253,7 +275,7 @@ func TestHeartbeatScheduler_TicksAndStopsOnCancel(t *testing.T) {
 	})
 	defer closeFn()
 
-	scheduler := NewHeartbeatScheduler(c, "mach-id", 10*time.Millisecond)
+	scheduler := tickEvery(NewHeartbeatScheduler(c, "mach-id", 0), 10*time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Millisecond)
 	defer cancel()
 
@@ -323,7 +345,7 @@ func TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses(t *testi
 	})
 	defer closeFn()
 
-	scheduler := NewHeartbeatScheduler(c, "mach-id", 2*time.Millisecond, WithHeartbeatOnTick(func(m *Machine, err error) {
+	scheduler := tickEvery(NewHeartbeatScheduler(c, "mach-id", 0, WithHeartbeatOnTick(func(m *Machine, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if err != nil {
@@ -331,7 +353,7 @@ func TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses(t *testi
 			return
 		}
 		observed = append(observed, m.Attributes.HeartbeatStatus)
-	}))
+	})), 2*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -410,11 +432,11 @@ func TestHeartbeatScheduler_TreatsPingNotFoundAsTheRowIsGoneSignal(t *testing.T)
 
 	gone := make(chan struct{})
 	var once sync.Once
-	scheduler := NewHeartbeatScheduler(c, "mach-id", 2*time.Millisecond, WithHeartbeatOnTick(func(_ *Machine, err error) {
+	scheduler := tickEvery(NewHeartbeatScheduler(c, "mach-id", 0, WithHeartbeatOnTick(func(_ *Machine, err error) {
 		if errors.Is(err, ErrNotFound) {
 			once.Do(func() { close(gone) })
 		}
-	}))
+	})), 2*time.Millisecond)
 
 	runErr := make(chan error, 1)
 	go func() { runErr <- scheduler.Run(ctx) }()
@@ -446,13 +468,13 @@ func TestHeartbeatScheduler_WithOnTickIsObservableExternally(t *testing.T) {
 
 	var mu sync.Mutex
 	var observed []*Machine
-	scheduler := NewHeartbeatScheduler(c, "mach-id", 10*time.Millisecond, WithHeartbeatOnTick(func(m *Machine, err error) {
+	scheduler := tickEvery(NewHeartbeatScheduler(c, "mach-id", 0, WithHeartbeatOnTick(func(m *Machine, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if err == nil {
 			observed = append(observed, m)
 		}
-	}))
+	})), 10*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
 	defer cancel()
@@ -479,13 +501,13 @@ func TestProcessHeartbeatScheduler_WithOnTickIsObservableExternally(t *testing.T
 
 	var mu sync.Mutex
 	var ticks int
-	scheduler := NewProcessHeartbeatScheduler(c, "proc-id", 10*time.Millisecond, WithProcessHeartbeatOnTick(func(p *Process, err error) {
+	scheduler := tickEveryProcess(NewProcessHeartbeatScheduler(c, "proc-id", 0, WithProcessHeartbeatOnTick(func(p *Process, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if err == nil {
 			ticks++
 		}
-	}))
+	})), 10*time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
 	defer cancel()
@@ -613,5 +635,80 @@ func TestProcessHeartbeatScheduler_DefaultIntervalWithin10s(t *testing.T) {
 	scheduler := NewProcessHeartbeatScheduler(c, "proc-id", 0)
 	if scheduler.interval != DefaultProcessHeartbeatInterval {
 		t.Fatalf("scheduler.interval = %v, want %v", scheduler.interval, DefaultProcessHeartbeatInterval)
+	}
+}
+
+// TestNewHeartbeatScheduler_FloorsASubSecondInterval pins the behaviour
+// change from "clamp the non-positive case" to "clamp to a one-second
+// floor". 500ms is the value that makes the change visible: the old guard
+// passed it through untouched, because time.NewTicker accepts it.
+//
+// Accepting it is not the same as it being safe. Measured through this
+// constructor against an httptest server, a 1ms interval issues 999 ping
+// requests per second and a 1ns interval issues 8593 — while 0, the one
+// input the old guard did catch, issues none. The guard was sorting inputs
+// by whether time.NewTicker would panic on them, which is a fact about
+// where a number came from rather than about what it does.
+//
+// Note the two clamps are deliberately different: 0 still means "use the
+// default" and yields DefaultHeartbeatInterval, while a positive
+// sub-second value is raised only as far as one second. A caller on a
+// genuinely short policy window must not be silently pushed out to 200s.
+func TestNewHeartbeatScheduler_FloorsASubSecondInterval(t *testing.T) {
+	c, err := New("acct-123", WithLicenseKey("lic-abc"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	tests := []struct {
+		name string
+		give time.Duration
+		want time.Duration
+	}{
+		{"500ms is raised to the one-second floor", 500 * time.Millisecond, time.Second},
+		{"1ms — 999 requests/second measured — is raised too", time.Millisecond, time.Second},
+		{"1ns is raised too", time.Nanosecond, time.Second},
+		{"exactly one second is already at the floor", time.Second, time.Second},
+		{"a second and a nanosecond is left alone", time.Second + time.Nanosecond, time.Second + time.Nanosecond},
+		{"a policy-sized interval is left alone", 30 * time.Second, 30 * time.Second},
+		{"zero still means use the default, not the floor", 0, DefaultHeartbeatInterval},
+		{"negative still means use the default", -5 * time.Second, DefaultHeartbeatInterval},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NewHeartbeatScheduler(c, "mach-id", tc.give).interval; got != tc.want {
+				t.Errorf("NewHeartbeatScheduler(interval=%v).interval = %v, want %v", tc.give, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewProcessHeartbeatScheduler_FloorsASubSecondInterval is the
+// ProcessHeartbeatScheduler half of the same rule. The process window is a
+// hardcoded 30s server-side, so no policy can ever justify a sub-second
+// process ping — but the flood is reachable here by the same
+// seconds-versus-Duration conversion mistake, so the guard is the same.
+func TestNewProcessHeartbeatScheduler_FloorsASubSecondInterval(t *testing.T) {
+	c, err := New("acct-123", WithLicenseKey("lic-abc"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	tests := []struct {
+		name string
+		give time.Duration
+		want time.Duration
+	}{
+		{"500ms is raised to the one-second floor", 500 * time.Millisecond, time.Second},
+		{"1ms is raised to the one-second floor", time.Millisecond, time.Second},
+		{"exactly one second is already at the floor", time.Second, time.Second},
+		{"the 10s default is left alone", 10 * time.Second, 10 * time.Second},
+		{"zero still means use the default, not the floor", 0, DefaultProcessHeartbeatInterval},
+		{"negative still means use the default", -1, DefaultProcessHeartbeatInterval},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NewProcessHeartbeatScheduler(c, "proc-id", tc.give).interval; got != tc.want {
+				t.Errorf("NewProcessHeartbeatScheduler(interval=%v).interval = %v, want %v", tc.give, got, tc.want)
+			}
+		})
 	}
 }

@@ -83,7 +83,7 @@ without action (though corrections/clarifications to this list are welcome):
   (`client.go::retryDelay`). It only has to desynchronize a retrying fleet; it is not a secret
   and predicting it grants nothing.
 
-## Compatibility Warning — Offline License File Format v2
+## Compatibility Warning — Offline Checkout File Format v2
 
 `(*LicenseFile).Verify` accepts **only** format-v2 `.lic` files: `alg` must be
 `base64+ed25519+v2` or `aes-256-gcm+ed25519+v2`, and the signed payload must carry the `meta`
@@ -95,3 +95,25 @@ The key derivation changed with it: the license-file AES key is now HKDF-SHA256
 (`internal/crypto/hkdf.go::DeriveLicenseFileKey`). The previous transform — the license key's
 raw UTF-8 bytes zero-padded/truncated to 32 — was removed rather than deprecated, so there is no
 way to open a v1 encrypted file with a current build.
+
+`(*MachineFile).Verify` applies the same rule to `.machine` files, and until this release it did
+not. Its `alg` must end in `+v2` (`checkout_machine.go::parseMachineFileAlg`); a v1 file — which
+carried no `meta.exp` inside the signed payload and derived its AES key by zero-padding the
+license key instead of through HKDF — is refused. The `+v2` check is an equality test on the
+last `+`-delimited segment, so `+v3` and `+v2junk` are refused too.
+
+Two behavioral breaks come with it, both in the fail-closed direction:
+
+- **Machine files now expire.** The signed `meta.exp` is enforced, with the same
+  `clockSkewToleranceSeconds` allowance and the same `*ExpiredError` as the license path. A file
+  that expired while nothing was checking now fails verification. `exp` is optional server-side —
+  a checkout made without a `ttl` has none and genuinely never expires — so its absence is not an
+  error. Supply a trusted timestamp via `MachineFile.Now` rather than trusting the local clock.
+- **A correctly-signed v2 file whose payload carries no `meta` is rejected** with
+  `ErrMissingClaims`. The server builds `meta` unconditionally, so such a file is not what its
+  own `+v2` marker claims.
+
+Separately, an encrypted machine file's `enc` is `"<nonce_b64>.<ciphertext_b64>"` — two
+separately base64-encoded halves — and was previously decoded as a single base64 blob, which
+could not succeed at all. Verification order is unchanged and still fail-closed: the signature
+over the whole `enc` string is checked before anything is split, decoded or decrypted.
