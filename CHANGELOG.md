@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.5](https://github.com/tamga-sh/tamga-go/compare/v1.2.4...v1.2.5) (2026-08-21)
+
+
+### Bug Fixes
+
+* canonicalise a fingerprint so one machine cannot hold three seats ([a24f683](https://github.com/tamga-sh/tamga-go/commit/a24f68337ffdc58793a05da44207072eb3693ae8))
+* reach an artifact's bytes without handing storage the licence key ([dbfbefc](https://github.com/tamga-sh/tamga-go/commit/dbfbefc817b509ae6b47faa8278d2c9476ba6e60))
+* three things an embedded client could not do, or could silently get wrong ([3c01727](https://github.com/tamga-sh/tamga-go/commit/3c01727a1c68f4adf3988819c52df209ab402251))
+* verify offline files against the key set their kid names ([4d7ae63](https://github.com/tamga-sh/tamga-go/commit/4d7ae63e16153398b47a6a22a1b4b822e3dab485))
+
 ## [1.2.4](https://github.com/tamga-sh/tamga-go/compare/v1.2.3...v1.2.4) (2026-08-21)
 
 
