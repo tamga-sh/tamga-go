@@ -32,13 +32,19 @@ type Machine struct {
 //
 // NextHeartbeatAt is the server's own view of when the next ping is due:
 // last_heartbeat_at plus the effective window. Which window that is
-// depends on the route. The ping and reset-heartbeat routes do not join
-// the policy, so a PingHeartbeat response derives both NextHeartbeatAt
-// and HeartbeatStatus from the 600s fallback whatever the policy says.
-// CheckOutMachine and GenerateOfflineProof do join it, so on those two
-// both fields are computed against the policy's real heartbeat_duration —
-// they are the only place this SDK sees the true window. See
-// HeartbeatStatus's doc comment for the window itself.
+// depends on which route answered, so enumerate rather than generalize:
+//
+//	CreateMachine, PingHeartbeat, ResetHeartbeat  600s fallback
+//	UpdateMachine (PATCH)                         600s fallback
+//	CheckOutMachine, GenerateOfflineProof         policy.heartbeat_duration
+//	GetMachine, ListMachines                      policy.heartbeat_duration
+//
+// The split is not write-versus-read: UpdateMachine is a write that lands
+// on the fallback side because its UPDATE … RETURNING omits the policies
+// join. Two responses for the same machine seconds apart can therefore
+// disagree about this field, and a caller holding a Machine cannot tell
+// which kind it has — so never size a ping interval from it. Read the
+// policy instead: Client.HeartbeatIntervalForLicense.
 type MachineAttributes struct {
 	Platform        *string         `json:"platform"`
 	NextHeartbeatAt *string         `json:"next_heartbeat_at"`
@@ -66,15 +72,13 @@ type MachineAttributes struct {
 // policy's heartbeat_duration when that field is set, and falls back to
 // 600s (10 min) only when it is null.
 //
-// ⚠️ This SDK does not adapt to it. machineHeartbeatWindow — and so
-// DefaultHeartbeatInterval, which is derived from it — is computed
-// against the 600s fallback alone. On a policy that sets a shorter
-// heartbeat_duration the default ping rate is too slow: the machine goes
-// stale between ticks and reads DEAD. Such callers must pass their own
-// interval to NewHeartbeatScheduler, and today they must learn their own
-// window out of band — this SDK models the field as
-// PolicyAttributes.HeartbeatDuration but exposes no call that returns a
-// Policy.
+// ⚠️ DefaultHeartbeatInterval does not adapt to it.
+// machineHeartbeatWindow — and so DefaultHeartbeatInterval, which is
+// derived from it — is computed against the 600s fallback alone. On a
+// policy that sets a shorter heartbeat_duration that default ping rate is
+// too slow: the machine goes stale between ticks and reads DEAD. Read the
+// real window with Client.HeartbeatIntervalForLicense and pass the result
+// to NewHeartbeatScheduler.
 //
 // The rule for a heartbeat loop is positive and status-independent: do
 // not stop on ANY status. The only terminal signal from a ping is a 404
@@ -89,14 +93,18 @@ type MachineAttributes struct {
 // sets it, so both answer NOT_STARTED. A `case DEAD` branch written
 // against any of those three is dead code.
 //
-// DEAD does reach callers of this SDK, through the two routes that
-// resolve the machine by *reading* a row rather than writing one:
-// Client.CheckOutMachine (on MachinePayload.Data, after
-// MachineFile.Verify) and Client.GenerateOfflineProof (on the *Machine it
-// returns). Both go through the server's find_by_id, which additionally
-// joins the policy — so the status there is a genuine staleness verdict
-// measured against the real window. Handle DEAD when reading either of
-// those; ignore it on a ping.
+// DEAD does reach callers of this SDK, and the durable form of the rule
+// is not write-versus-read: it is whether the response was built off a
+// last_heartbeat_at that this same request just wrote. A response derived
+// from a timestamp the request set can never say DEAD; one derived from
+// an untouched timestamp can. The routes here that can report it are
+// Client.GetMachine, Client.ListMachines, Client.CheckOutMachine (on
+// MachinePayload.Data, after MachineFile.Verify),
+// Client.GenerateOfflineProof (on the *Machine it returns) and
+// Client.UpdateMachine — the last being a write that never touches the
+// heartbeat columns, which is why the write-versus-read shorthand is only
+// an approximation. Handle DEAD when reading any of those; ignore it on a
+// ping.
 //
 // Wherever it does appear, DEAD means ONLY "the last ping is older than
 // the heartbeat window." It does NOT mean the machine row was culled,
@@ -124,10 +132,41 @@ const (
 
 // machineHeartbeatWindow is the server's 600-second (10 min) *fallback*
 // machine heartbeat window, which applies only to a policy that leaves
-// heartbeat_duration null. It is a constant here because this SDK cannot
-// read the policy, so a shorter policy-configured window is not reflected
-// — see HeartbeatStatus's doc comment.
+// heartbeat_duration null. It is a constant because it backs
+// DefaultHeartbeatInterval, which has to have a value before any policy
+// has been read; PolicyAttributes.EffectiveHeartbeatWindow returns the
+// same number for a policy that leaves the field null and the policy's
+// own value otherwise.
 const machineHeartbeatWindow = 600 * time.Second
+
+// minHeartbeatInterval is the shortest ping interval this SDK will
+// schedule. Both heartbeat scheduler constructors and the policy-derived
+// PolicyAttributes.HeartbeatInterval raise any *positive* value below it
+// to exactly this, so no code path in this package can hand a sub-second
+// interval to a time.Ticker.
+//
+// The floor replaced a narrower "non-positive only" guard, because
+// bounding the request *rate* is the safety property and Go's own guard
+// bounds only the *panic*. time.NewTicker rejects a non-positive interval
+// outright — "non-positive interval for NewTicker" — which is the whole
+// reason the old clamp existed; but one representable value up,
+// time.NewTicker(time.Millisecond) is perfectly legal and ticks a
+// thousand times a second. Measured through NewHeartbeatScheduler itself
+// against an httptest server: a 1ms interval issues 999 ping requests per
+// second and a 1ns interval issues 8593, while 0 — the one input the old
+// clamp did catch — issues none, because it became the 200s default. A
+// rule that guards only what the runtime refuses is a rule about where a
+// number came from, not about what it does.
+//
+// The range is reachable by ordinary mistake rather than only by abuse:
+// this package's interval parameters are time.Duration, while the policy
+// field behind them, heartbeat_duration, counts whole *seconds*. A caller
+// converting units by hand lands directly in it.
+//
+// One second costs nothing against any window the server can express; the
+// arithmetic is in PolicyAttributes.HeartbeatInterval's doc comment and is
+// pinned by TestPolicyHeartbeatInterval_LossesTolerablePerWindow.
+const minHeartbeatInterval = time.Second
 
 // CreateMachineOptions configures CreateMachine. Fingerprint and LicenseID
 // are required; every other field is optional.
@@ -385,8 +424,9 @@ func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine
 // window/3 (~200s against the server's 600s fallback window), available
 // as DefaultHeartbeatInterval. That default assumes the fallback: on a
 // policy that sets a shorter heartbeat_duration it pings too slowly and
-// the machine reads DEAD between ticks, so pass an explicit interval
-// instead — see HeartbeatStatus's doc comment.
+// the machine reads DEAD between ticks. Size the interval from the policy
+// instead — Client.HeartbeatIntervalForLicense does exactly that in one
+// call.
 //
 // No HeartbeatStatus is a stop condition, and Run deliberately keeps
 // pinging whatever comes back. It never inspects the status, and a caller
@@ -410,7 +450,9 @@ type HeartbeatScheduler struct {
 // DefaultHeartbeatInterval is machineHeartbeatWindow/3 — the recommended
 // default HeartbeatScheduler interval, safely inside the server's 600s
 // fallback window but NOT inside a shorter policy-configured one. Only a
-// policy that leaves heartbeat_duration null is covered by this default.
+// policy that leaves heartbeat_duration null is covered by this default;
+// use Client.HeartbeatIntervalForLicense to size the interval from the
+// policy that actually applies.
 const DefaultHeartbeatInterval = machineHeartbeatWindow / 3
 
 // HeartbeatSchedulerOption configures a HeartbeatScheduler built via
@@ -440,9 +482,28 @@ func WithHeartbeatOnTick(fn func(*Machine, error)) HeartbeatSchedulerOption {
 // every DefaultHeartbeatInterval unless overridden by interval (pass 0 to
 // use the default). Pass WithHeartbeatOnTick to observe each tick's
 // PingHeartbeat result.
+//
+// interval is clamped two ways, and the two are not the same rule. A
+// non-positive interval means "use the default" and yields
+// DefaultHeartbeatInterval, as it always has. A *positive* interval below
+// minHeartbeatInterval is raised to minHeartbeatInterval — one second —
+// rather than to the default, so that a caller asking for a genuinely
+// short window still gets the shortest interval this SDK will schedule
+// instead of being silently pushed out to 200s. 500ms therefore becomes
+// 1s, not 200s.
+//
+// The floor is a guard on this argument, not an invariant Run rechecks:
+// it exists because a sub-second interval is a request flood
+// (time.NewTicker(time.Millisecond) ticks a thousand times a second and
+// does not panic), and because this parameter is a time.Duration while
+// the policy field behind it counts whole seconds. See
+// minHeartbeatInterval for the measurements.
 func NewHeartbeatScheduler(c *Client, machineID string, interval time.Duration, opts ...HeartbeatSchedulerOption) *HeartbeatScheduler {
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
 		interval = DefaultHeartbeatInterval
+	case interval < minHeartbeatInterval:
+		interval = minHeartbeatInterval
 	}
 	s := &HeartbeatScheduler{client: c, machineID: machineID, interval: interval}
 	for _, opt := range opts {
@@ -626,6 +687,11 @@ type CreateProcessOptions struct {
 // ErrPIDTaken. Unlike a machine (which starts NOT_STARTED), a process
 // starts ALIVE immediately — its LastHeartbeatAt is set at creation, not
 // left unset until a first ping.
+//
+// ⚠️ Pair every call with a DeleteProcess on shutdown. Nothing
+// server-side ever reaps a process row whose heartbeat lapsed, and every
+// surviving row counts against the policy's max_processes — see
+// DeleteProcess.
 func (c *Client) CreateProcess(ctx context.Context, opts CreateProcessOptions) (*Process, error) {
 	metadata := opts.Metadata
 	if metadata == nil {
@@ -692,9 +758,20 @@ func WithProcessHeartbeatOnTick(fn func(*Process, error)) ProcessHeartbeatSchedu
 // processID, pinging every DefaultProcessHeartbeatInterval unless
 // overridden by interval (pass 0 to use the default). Pass
 // WithProcessHeartbeatOnTick to observe each tick's PingProcess result.
+//
+// interval is clamped exactly as NewHeartbeatScheduler's is: non-positive
+// yields DefaultProcessHeartbeatInterval, while a positive value below
+// minHeartbeatInterval is raised to one second rather than to the
+// default. The process window is hardcoded 30s server-side, so no policy
+// can ever justify a sub-second process ping — but the flood is reachable
+// here by the same unit-conversion mistake, and the same measurements
+// apply. See minHeartbeatInterval.
 func NewProcessHeartbeatScheduler(c *Client, processID string, interval time.Duration, opts ...ProcessHeartbeatSchedulerOption) *ProcessHeartbeatScheduler {
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
 		interval = DefaultProcessHeartbeatInterval
+	case interval < minHeartbeatInterval:
+		interval = minHeartbeatInterval
 	}
 	s := &ProcessHeartbeatScheduler{client: c, processID: processID, interval: interval}
 	for _, opt := range opts {
