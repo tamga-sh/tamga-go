@@ -35,7 +35,7 @@ tamga-go/
 ├── entitlement.go              # Entitlement resource, HasEntitlement + cache
 ├── policy.go                   # LicenseScheme/OverageStrategy/heartbeat enums
 ├── checkout_license.go         # .lic parse/verify — Ed25519 + HKDF AES key, format v2
-├── checkout_machine.go         # .machine parse/verify — multi-scheme + HKDF
+├── checkout_machine.go         # .machine parse/verify — multi-scheme + HKDF, format v2
 ├── proof.go                    # offline proof generate/verify — byte-exact RSA
 ├── errors.go                   # JSON:API Error/ErrorResponse, APIError Is/As
 │
@@ -224,6 +224,19 @@ committing to it, the way this file's own note on `golang.org/x/crypto` pinning 
   number `just test`'s plain `-cover` summary doesn't show).
 - Table-driven tests are the house style (see `~/.claude/rules/testing.md` / `ecc:golang-testing`
   — RED/GREEN/REFACTOR, write the test before the implementation).
+- **Never generate a `.machine` fixture in this repo.** `testdata/server-machine-file-fixtures/`
+  holds certificates produced by the tamga-api server's own `encode_machine_file`, with a
+  `manifest.json` giving each one's `alg`, `scheme`, `public_key_b64`, `kid`, `license_key`,
+  `fingerprint` and `expired` flag. `machine_file_v2_test.go` **iterates that manifest** rather
+  than naming files, so dropping a new fixture into the directory extends coverage with no code
+  change — and that is the only supported way to add one. A self-generated fixture proves
+  nothing: it reproduces whatever the verifier believes, which is exactly how the M1/M2/M3
+  machine-file defects stayed green here for two years while nothing the server emitted could
+  be opened. `testdata/pre_v2_selfgenerated_*.machine` are the retired self-generated files,
+  kept only as negative fixtures for the `+v2` rule.
+  Because the "valid" fixtures carry a real `exp` an hour after they were minted, the suite
+  drives `MachineFile.Now` explicitly instead of relying on the wall clock — epoch 0 when the
+  expiry check is not what is under test, an `exp`-relative timestamp when it is.
 - `checkout_license_test.go`, `checkout_machine_test.go`, and `proof_test.go` each carry a
   **negative regression test that is more important than its happy-path counterpart**: a test
   that deliberately reintroduces that file's central bug (signing over decoded bytes instead

@@ -478,11 +478,28 @@ func verifyMachineFileSignature(scheme LicenseScheme, pub crypto.PublicKey, mess
 	}
 }
 
-// ParsePKIXPublicKey is a re-export of x509.ParsePKIXPublicKey for
-// convenience — callers loading an RSA/ECDSA public key for
-// (*MachineFile).Verify from a SubjectPublicKeyInfo (SPKI) DER blob (the
-// format an account's public key is typically distributed in) can use this
-// instead of importing crypto/x509 themselves purely for this one call.
+// ParsePKIXPublicKey is a re-export of x509.ParsePKIXPublicKey, for callers
+// that already hold a SubjectPublicKeyInfo (SPKI) DER blob and would
+// otherwise import crypto/x509 purely for this one call.
+//
+// ⚠️ It is SPKI-only, and the Tamga API does not publish every account key
+// as SPKI — so this is a convenience for keys you already know to be SPKI,
+// not a general-purpose loader for (*MachineFile).Verify. Specifically:
+//
+//   - An ECDSA P-256 account key is a raw 65-byte uncompressed SEC1 point
+//     (0x04 || X || Y), not a DER structure at all. This function cannot
+//     read it and neither can any other crypto/x509 entry point; build the
+//     *ecdsa.PublicKey directly from the coordinates instead (see
+//     examples/checkout_machine for the eight lines that does).
+//   - An RSA-2048 account key may arrive as PKCS#1 RSAPublicKey DER (270
+//     bytes) or as SPKI (294 bytes), depending on which endpoint served it.
+//     Use x509.ParsePKCS1PublicKey for the first; only the second parses
+//     here.
+//   - An Ed25519 account key is the raw 32 bytes; convert with
+//     ed25519.PublicKey(b).
+//
+// Verify itself takes the parsed key, so it is unaffected by any of this —
+// the encoding is entirely the caller's side of the boundary.
 func ParsePKIXPublicKey(der []byte) (crypto.PublicKey, error) {
 	return x509.ParsePKIXPublicKey(der)
 }

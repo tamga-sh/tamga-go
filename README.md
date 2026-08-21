@@ -196,9 +196,13 @@ Set `LicenseFile.Now` to a server-supplied timestamp if you do not want to trust
 
 ### Machine files (`.machine`)
 
-Same envelope, but the signing algorithm is chosen by the governing license's own `Scheme` —
-never by parsing the file's self-declared `alg` — and decryption needs both the license key and
-the target machine's fingerprint.
+Same envelope and the same v2 rules, with two differences. The signing algorithm is chosen by
+the governing license's own `Scheme` — never by parsing the file's self-declared `alg` — and
+decryption needs both the license key and the target machine's fingerprint.
+
+`Alg` is a three-part string, `<encoding>+<signing suffix>+v2`: `base64+ed25519+v2`,
+`aes-256-gcm+rsa-pss-sha256+v2`, and so on. The `+v2` marker is mandatory, exactly as it is for
+`.lic`.
 
 ```go
 file, err := tamga.ParseMachineFile(pemText)
@@ -210,14 +214,32 @@ if err != nil {
 // when the license has no scheme set — that is the server's own default.
 // pub must match: ed25519.PublicKey, *rsa.PublicKey, or *ecdsa.PublicKey.
 payload, err := file.Verify(tamga.SchemeEd25519Sign, accountPubKey, licenseKey, fingerprint)
-if err != nil {
+
+var expired *tamga.ExpiredError
+switch {
+case err == nil:
+	// Claims.ExpiresAt is 0 when the checkout was made without a ttl —
+	// that file genuinely never expires.
+	fmt.Println(payload.Data.Attributes.Fingerprint, payload.Claims.ExpiresAt)
+case errors.As(err, &expired):
+	fmt.Printf("file expired at %d — check out a fresh one\n", expired.ExpiresAt)
+case errors.Is(err, tamga.ErrInvalidSignature):
+	fmt.Println("forged or corrupted file")
+default:
 	log.Fatal(err)
 }
-fmt.Println(payload.Data.Attributes.Fingerprint)
 ```
 
-`tamga.ParsePKIXPublicKey(der)` is re-exported for loading an RSA/ECDSA key from an SPKI DER
-blob without importing `crypto/x509` yourself.
+Set `MachineFile.Now` to a server-supplied timestamp for the same reason you would set
+`LicenseFile.Now`.
+
+`tamga.ParsePKIXPublicKey(der)` is re-exported for loading a key from an SPKI DER blob without
+importing `crypto/x509` yourself — but note that **the API does not publish every account key as
+SPKI**, so it is not a general-purpose loader. An ECDSA P-256 key is a raw 65-byte uncompressed
+SEC1 point (`0x04 || X || Y`) that no `crypto/x509` entry point can read; an RSA-2048 key may be
+PKCS#1 `RSAPublicKey` DER (270 bytes) or SPKI (294 bytes) depending on the endpoint that served
+it; an Ed25519 key is the raw 32 bytes. `examples/checkout_machine/main.go::parsePublicKey`
+handles all four cases and is the copy-paste source.
 
 ### Offline proofs
 
@@ -251,6 +273,20 @@ Every claim below is implemented at the cited location.
   `jti`, `kid`). A pre-v2 file is rejected with `ErrMissingClaims`
   (`checkout_license.go::(*LicenseFile).Verify`). **This is a behavioral break:** v1 `.lic`
   files fail verification outright, with no fallback path. Re-issue them via `CheckOutLicense`.
+- **Machine files are format v2 only too, on the same terms.** `alg` must end in `+v2`
+  (`checkout_machine.go::parseMachineFileAlg`) — the check is an equality test on the last
+  `+`-delimited segment, not a substring search, so `+v3` and `+v2junk` are refused as well —
+  and the payload's `meta` claims are surfaced on `MachinePayload.Claims`. The signed `exp` is
+  enforced with the same `clockSkewToleranceSeconds` and the same `*ExpiredError` as the license
+  path, and `MachineFile.Now` accepts a trusted timestamp for the same reason. `exp` is optional
+  server-side — a checkout made without a `ttl` produces a file with no `exp` that genuinely
+  never expires, so its absence is not an error. **This is a behavioral break:** a v1 `.machine`
+  file, and any file that expired while nothing was checking, now fails.
+- **An encrypted machine file's `enc` is `"<nonce_b64>.<ciphertext_b64>"`** — two separately
+  base64-encoded halves, decoded independently (`checkout_machine.go::splitEncryptedEnc`), with
+  the GCM tag already appended to the ciphertext half. It is *not* a single base64 blob of
+  `nonce||ciphertext||tag`; an encrypted `.lic` file is, and the two must not be conflated. The
+  split happens only after the signature over the whole `enc` string has passed.
 - **The signed `exp` is enforced, with a 60-second clock-skew tolerance**
   (`checkout_license.go::clockSkewToleranceSeconds`, applied in `(*LicenseFile).Verify`). The
   tolerance is deliberately small: the local clock is attacker-controlled, so a generous

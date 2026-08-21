@@ -92,10 +92,18 @@ func main() {
 		payload.Claims.ExpiresAt, payload.Claims.ID)
 }
 
-// parsePublicKey decodes -pubkey per -scheme's documented wire format
-// (checkout_machine.go's Verify doc comment): raw 32 bytes for Ed25519, an
-// SPKI DER blob for either RSA variant, or a 65-byte uncompressed P-256
-// point for ECDSA.
+// parsePublicKey decodes -pubkey into the concrete key type Verify wants for
+// -scheme. The encodings are not uniform, and not all of them are SPKI:
+//
+//   - Ed25519: the raw 32-byte key.
+//   - ECDSA P-256: a raw 65-byte uncompressed SEC1 point (0x04 || X || Y), NOT
+//     an SPKI DER blob — so x509.ParsePKIXPublicKey (and the tamga.ParsePKIXPublicKey
+//     re-export) cannot read it, and neither can crypto/x509 at all. Rebuild the
+//     point by hand, as below.
+//   - RSA-2048, either variant: a DER blob that may be PKCS#1 RSAPublicKey (270
+//     bytes at 2048 bits) or SubjectPublicKeyInfo (294 bytes), depending on which
+//     server endpoint published it. Both are reachable, so try PKCS#1 first and
+//     fall back to SPKI rather than assuming either.
 func parsePublicKey(scheme tamga.LicenseScheme, b64 string) (crypto.PublicKey, error) {
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
@@ -108,9 +116,12 @@ func parsePublicKey(scheme tamga.LicenseScheme, b64 string) (crypto.PublicKey, e
 		}
 		return ed25519.PublicKey(raw), nil
 	case tamga.SchemeRSA2048PKCS1Sign, tamga.SchemeRSA2048PKCS1PSSSign:
+		if rsaPub, err := x509.ParsePKCS1PublicKey(raw); err == nil {
+			return rsaPub, nil
+		}
 		pub, err := x509.ParsePKIXPublicKey(raw)
 		if err != nil {
-			return nil, fmt.Errorf("parse SPKI DER: %w", err)
+			return nil, fmt.Errorf("RSA public key is neither PKCS#1 nor SPKI DER: %w", err)
 		}
 		rsaPub, ok := pub.(*rsa.PublicKey)
 		if !ok {

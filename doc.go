@@ -45,7 +45,7 @@
 // machine lifecycle, and entitlement checks. The protocol reference this
 // package implements against is published at https://tamga.sh.
 //
-// # Offline license file format v2
+// # Offline checkout file format v2
 //
 // LicenseFile.Verify accepts only format-v2 .lic files: Alg must be
 // AlgBase64Ed25519 ("base64+ed25519+v2") or AlgAES256GCMEd25519
@@ -59,7 +59,24 @@
 // derivation changed with the format: the license-file AES key is now
 // HKDF-SHA256, replacing (not deprecating) the earlier transform.
 //
-// Machine files are a separate format and carry no signed claims; see
+// Machine files (.machine) are format v2 on the same terms, and this
+// package used to say the opposite. MachineFile.Alg is a three-part
+// "<encoding>+<signing suffix>+v2" string — "base64+ed25519+v2",
+// "aes-256-gcm+rsa-pss-sha256+v2" and so on, where the signing suffix
+// follows the license's own LicenseScheme rather than always being Ed25519
+// — and a file without the +v2 marker is refused. The payload carries the
+// same LicenseFileClaims, surfaced on MachinePayload.Claims, and its exp is
+// enforced with the same tolerance and the same *ExpiredError. Use
+// MachineFile.Now to supply a trusted timestamp, as with LicenseFile.Now.
+//
+// Two shape differences from a .lic file are load-bearing. The signing
+// scheme must be passed in by the caller and is never read out of Alg: the
+// server emits the same "rsa-sha256" suffix for both
+// SchemeRSA2048PKCS1Sign and SchemeRSA2048JWTRS256, so the suffix cannot
+// identify the scheme (SchemeRSA2048JWTRS256 itself is refused up front).
+// And an encrypted machine file's Enc is "<nonce_b64>.<ciphertext_b64>" —
+// two separately base64-encoded halves — where an encrypted .lic file's Enc
+// is a single base64 blob of nonce||ciphertext||tag. See
 // MachineFile.Verify.
 //
 // # Rate limiting
