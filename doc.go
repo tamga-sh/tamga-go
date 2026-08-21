@@ -39,6 +39,20 @@
 // Client.ResetHeartbeat and Client.GenerateOfflineProof are role-gated
 // above it and return 403 unconditionally under WithLicenseKey.
 //
+// # Artifacts
+//
+// Once CheckUpgrade reports a newer release, ListReleaseArtifacts and
+// GetArtifact describe its uploaded files and DownloadArtifact fetches the
+// bytes. The download route answers a 303 redirect to a short-lived
+// presigned storage URL by default; this package never lets that redirect
+// be followed, because the redirected request can carry the raw license key
+// to a host that is not the Tamga API. See ArtifactDownloadURL.
+//
+// A license key can read and download artifacts but not create, update or
+// delete them — publishing a build is a pipeline concern carried out with a
+// product or environment token, and those routes are deliberately not
+// wrapped here.
+//
 // See the examples/ directory (not part of this package, run individually
 // via `go run ./examples/<name>`) for full runnable programs covering
 // validation, check-in, offline license/machine file verification, the
@@ -189,6 +203,7 @@
 //   - policy.go             LicenseScheme/OverageStrategy/heartbeat enums, Policy resource
 //   - policy_read.go        Policy/license reads, policy-derived heartbeat window
 //   - release.go            Release resource and the auto-update check
+//   - artifact.go           Artifact resource, list/get, presigned download URL
 //   - health.go             Unauthenticated /v1/health probe
 //   - checkout_license.go   .lic file parse/verify (Ed25519 signature + HKDF-derived AES key)
 //   - checkout_machine.go   .machine file parse/verify (multi-scheme signature + HKDF key)

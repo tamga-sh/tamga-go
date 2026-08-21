@@ -103,9 +103,19 @@ server-internal (analytics storage, edition gating) and don't apply to any SDK.
   why `UpgradeOptions.validate` refuses an incomplete query locally. `ReleaseAttributes` is
   camelCase (`productId`) **except** `created`/`updated`, which carry per-field renames that
   override the struct rule — derive any fixture from `releases/serializer.rs`, never from the Go
-  struct tags. The artifact download route exists too, but is still blocked by a server-side
-  permission gap (no role holds `artifact.download`) — don't ship a download method until that
-  is fixed upstream.
+  struct tags.
+- **Artifact read/download IS reachable under a licence key; this file used to say it was not.**
+  The old entry claimed the download route was "blocked by a server-side permission gap (no role
+  holds `artifact.download`)". That was true when measured and is false now: tamga-api's
+  `e6d317b` added `artifact.read` and `artifact.download` to `Role::LicenseToken`
+  (`authz/mod.rs:264-265`) and routed a real `download_artifact` handler. `artifact.go` wraps the
+  three reachable routes. `artifact.create`/`update`/`delete` are still absent from that role, so
+  create/update/delete/upload stay out of scope. Three things the wrapper has to get right:
+  the download answers **`303`** to a presigned storage URL and the licence key must never
+  follow it (`?redirect=false` plus a redirect-suppressing client — see `noRedirectClient`);
+  `ArtifactAttributes` is camelCase **except** `created`/`updated`, exactly like
+  `ReleaseAttributes`; and the handler runs `enforce_release_access` on top of the permission, so
+  a `403` there can mean a CLOSED release rather than a bad token.
 - **`GET /v1/health` must be sent with NO credential** (`health.go`, `Health`).
   `require_authentication` resolves the request's bearer *before* it consults the public-route
   list and propagates a resolution error either way, so a suspended/expired/policy-refused
