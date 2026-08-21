@@ -167,8 +167,8 @@ type MachinePayload struct {
 	// already enforced ExpiresAt by the time a caller sees these; IssuedAt,
 	// ID (jti) and KeyID (kid) are exposed for the caller's own use —
 	// jti for replay detection, kid for a future key rotation.
-	Claims LicenseFileClaims
 	Data   Machine
+	Claims LicenseFileClaims
 }
 
 // Verify orchestrates the full verify -> decrypt -> parse pipeline for an
@@ -249,9 +249,23 @@ func (f *MachineFile) Verify(scheme LicenseScheme, pub crypto.PublicKey, license
 	}
 
 	// Only now, with the signature checked, is enc decoded. Which decoding
-	// applies is decided by the encoding prefix parsed out of the (signed-
-	// over, cross-checked) alg string — never by sniffing enc itself for a
-	// dot, which would let the file's own body pick its parser.
+	// applies is decided by the encoding prefix parsed out of the alg
+	// string — never by sniffing enc itself for a dot, which would let the
+	// file's own body pick its parser.
+	//
+	// ⚠️ alg is NOT covered by the signature: the server signs enc's bytes
+	// and nothing else, so alg is authenticated only as far as the suffix
+	// cross-check above takes it, and the encoding prefix is not
+	// authenticated at all. Holder of a validly-signed file can therefore
+	// flip the prefix and force the other branch to run over the same
+	// still-valid enc. That is currently harmless because the two wire
+	// formats have disjoint alphabets — a dot-joined enc is never valid
+	// standalone base64, and a base64 blob never contains the dot
+	// splitEncryptedEnc needs — so each branch rejects the other's input
+	// outright. Note that this is a property of the two encodings, not a
+	// cryptographic binding; a third encoding without that incompatibility
+	// would need the encrypted/plain bit moved inside the signed meta
+	// claims server-side to stay safe.
 	var plaintext []byte
 	switch encPrefix {
 	case "base64":
@@ -292,7 +306,7 @@ func (f *MachineFile) Verify(scheme LicenseScheme, pub crypto.PublicKey, license
 	// unconditionally), so reaching the expiry check with nothing to check
 	// means the file is not what its own +v2 marker claims.
 	if payload.Meta == nil {
-		return nil, fmt.Errorf("tamga: machine file payload is missing the signed meta claims: %w", ErrMissingClaims)
+		return nil, ErrMissingClaims
 	}
 
 	// The signature proves the file is authentic. It does not prove it is

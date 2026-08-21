@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -147,6 +148,17 @@ func TestParseMachineFile_WellFormedPEMFixture(t *testing.T) {
 // possibly have signed it: the alg gate has to reject it anyway, and any
 // ErrInvalidSignature here would mean the gate ran after the crypto instead
 // of before it.
+// readTestdataFixture reads a fixture from testdata/ by base name.
+//
+// The path is assembled here rather than at each call site so gosec's G304
+// (file inclusion via variable) has a single place to look at: name comes
+// from a literal table inside a test, never from input, and testdata/ is the
+// only directory reachable.
+func readTestdataFixture(t *testing.T, name string) ([]byte, error) {
+	t.Helper()
+	return os.ReadFile(filepath.Join("testdata", filepath.Base(name)))
+}
+
 func TestMachineFileVerify_RejectsPreV2SelfGeneratedFixtures(t *testing.T) {
 	fixtures := map[string]LicenseScheme{
 		"pre_v2_selfgenerated_ed25519.machine":   SchemeEd25519Sign,
@@ -156,7 +168,7 @@ func TestMachineFileVerify_RejectsPreV2SelfGeneratedFixtures(t *testing.T) {
 	}
 	for name, scheme := range fixtures {
 		t.Run(name, func(t *testing.T) {
-			pemBytes, err := os.ReadFile("testdata/" + name)
+			pemBytes, err := readTestdataFixture(t, name)
 			if err != nil {
 				t.Fatalf("ReadFile() error = %v", err)
 			}

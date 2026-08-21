@@ -51,18 +51,20 @@ const serverMachineFixtureDir = "testdata/server-machine-file-fixtures"
 // the fixture generator alongside the certificates; the fields mirror what the
 // server knew when it signed each file.
 type serverMachineFixture struct {
+	LicenseKey *string `json:"license_key"`
+
 	Name string `json:"-"`
 
-	File              string  `json:"file"`
-	Alg               string  `json:"alg"`
-	Encrypted         bool    `json:"encrypted"`
-	EncIsDotSeparated bool    `json:"enc_is_dot_separated"`
-	PublicKeyB64      string  `json:"public_key_b64"`
-	KID               string  `json:"kid"`
-	LicenseKey        *string `json:"license_key"`
-	Fingerprint       string  `json:"fingerprint"`
-	Expired           bool    `json:"expired"`
-	Scheme            string  `json:"scheme"`
+	File         string `json:"file"`
+	Alg          string `json:"alg"`
+	PublicKeyB64 string `json:"public_key_b64"`
+	KID          string `json:"kid"`
+	Fingerprint  string `json:"fingerprint"`
+	Scheme       string `json:"scheme"`
+
+	Encrypted         bool `json:"encrypted"`
+	EncIsDotSeparated bool `json:"enc_is_dot_separated"`
+	Expired           bool `json:"expired"`
 }
 
 // loadServerMachineFixtures reads manifest.json and returns its entries sorted
@@ -309,8 +311,8 @@ func TestMachineFileVerify_ServerFixtures_ExpiryEnforced(t *testing.T) {
 			// comparison is now-TOLERANCE > exp, not >=.
 			file = fx.parse(t)
 			file.Now = at(exp + clockSkewToleranceSeconds)
-			if _, err := file.Verify(scheme, pub, licenseKey, fingerprint); err != nil {
-				t.Errorf("Verify() at exp+%d error = %v, want success (skew tolerance)", clockSkewToleranceSeconds, err)
+			if _, edgeErr := file.Verify(scheme, pub, licenseKey, fingerprint); edgeErr != nil {
+				t.Errorf("Verify() at exp+%d error = %v, want success (skew tolerance)", clockSkewToleranceSeconds, edgeErr)
 			}
 
 			// One second past it, expired.

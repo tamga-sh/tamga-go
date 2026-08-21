@@ -313,10 +313,11 @@ func (f *LicenseFile) now() int64 {
 }
 
 // ErrMissingClaims is returned when a checkout file's payload has no signed
-// meta claims — i.e. it is a pre-v2 file. Shared by (*LicenseFile).Verify
-// and (*MachineFile).Verify; the machine-file path wraps it so the message
-// names the right file type, and errors.Is still matches.
-var ErrMissingClaims = errors.New("tamga: license file payload is missing the signed meta claims (pre-v2 file)")
+// meta claims — i.e. it is a pre-v2 file. Returned bare by both
+// (*LicenseFile).Verify and (*MachineFile).Verify, so its message names no
+// file type: the caller knows which one it called, and naming one here made
+// the machine-file message contradict itself.
+var ErrMissingClaims = errors.New("tamga: checkout file payload is missing the signed meta claims (pre-v2 file)")
 
 // ExpiredError is returned when a checkout file's signature verified but its
 // signed exp claim has passed. Both (*LicenseFile).Verify and
