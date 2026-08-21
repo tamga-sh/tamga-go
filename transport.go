@@ -174,8 +174,24 @@ func sanitizeVersion(version string) string {
 // successful response or *APIError for support/debugging purposes.
 //
 // Deliberately not modeled: Tamga-Environment (no server code path reads
-// it yet — planned EE feature) and X-RateLimit-* (declared in the CORS
-// allowlist only, never set by any handler).
+// it yet — planned EE feature).
+//
+// X-RateLimit-* is a different case and this comment used to get it wrong.
+// It claimed the headers were "declared in the CORS allowlist only, never set
+// by any handler". They are set: the rate-limit middleware writes four of them
+// — x-ratelimit-limit, -remaining, -reset and -window — onto the response it
+// is about to return, throttled or not. The same four are also in the CORS
+// expose list, and that is what the old claim confused with "only there".
+//
+// They are still not modeled here, but for a real reason rather than a wrong
+// one: surfacing them means adding fields to this struct, which breaks unkeyed
+// composite literals and so belongs in a minor. Two things to get right when
+// that happens. x-ratelimit-reset is an absolute Unix timestamp, not a delay,
+// so sleeping for its value parks a caller for decades. And absence must stay
+// distinguishable from zero: the middleware skips the block entirely when no
+// limiter is configured, on OPTIONS preflight, and — being installed with
+// route_layer — on any unmatched path, so reading a missing remaining as 0
+// throttles a client against a server that is not limiting it.
 type ResponseInfo struct {
 	// TamgaVersion is the Tamga-Version header echoed back by the server.
 	TamgaVersion string
