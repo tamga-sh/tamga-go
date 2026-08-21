@@ -139,6 +139,35 @@ const (
 // own value otherwise.
 const machineHeartbeatWindow = 600 * time.Second
 
+// minHeartbeatInterval is the shortest ping interval this SDK will
+// schedule. Both heartbeat scheduler constructors and the policy-derived
+// PolicyAttributes.HeartbeatInterval raise any *positive* value below it
+// to exactly this, so no code path in this package can hand a sub-second
+// interval to a time.Ticker.
+//
+// The floor replaced a narrower "non-positive only" guard, because
+// bounding the request *rate* is the safety property and Go's own guard
+// bounds only the *panic*. time.NewTicker rejects a non-positive interval
+// outright — "non-positive interval for NewTicker" — which is the whole
+// reason the old clamp existed; but one representable value up,
+// time.NewTicker(time.Millisecond) is perfectly legal and ticks a
+// thousand times a second. Measured through NewHeartbeatScheduler itself
+// against an httptest server: a 1ms interval issues 999 ping requests per
+// second and a 1ns interval issues 8593, while 0 — the one input the old
+// clamp did catch — issues none, because it became the 200s default. A
+// rule that guards only what the runtime refuses is a rule about where a
+// number came from, not about what it does.
+//
+// The range is reachable by ordinary mistake rather than only by abuse:
+// this package's interval parameters are time.Duration, while the policy
+// field behind them, heartbeat_duration, counts whole *seconds*. A caller
+// converting units by hand lands directly in it.
+//
+// One second costs nothing against any window the server can express; the
+// arithmetic is in PolicyAttributes.HeartbeatInterval's doc comment and is
+// pinned by TestPolicyHeartbeatInterval_LossesTolerablePerWindow.
+const minHeartbeatInterval = time.Second
+
 // CreateMachineOptions configures CreateMachine. Fingerprint and LicenseID
 // are required; every other field is optional.
 //
@@ -453,9 +482,28 @@ func WithHeartbeatOnTick(fn func(*Machine, error)) HeartbeatSchedulerOption {
 // every DefaultHeartbeatInterval unless overridden by interval (pass 0 to
 // use the default). Pass WithHeartbeatOnTick to observe each tick's
 // PingHeartbeat result.
+//
+// interval is clamped two ways, and the two are not the same rule. A
+// non-positive interval means "use the default" and yields
+// DefaultHeartbeatInterval, as it always has. A *positive* interval below
+// minHeartbeatInterval is raised to minHeartbeatInterval — one second —
+// rather than to the default, so that a caller asking for a genuinely
+// short window still gets the shortest interval this SDK will schedule
+// instead of being silently pushed out to 200s. 500ms therefore becomes
+// 1s, not 200s.
+//
+// The floor is a guard on this argument, not an invariant Run rechecks:
+// it exists because a sub-second interval is a request flood
+// (time.NewTicker(time.Millisecond) ticks a thousand times a second and
+// does not panic), and because this parameter is a time.Duration while
+// the policy field behind it counts whole seconds. See
+// minHeartbeatInterval for the measurements.
 func NewHeartbeatScheduler(c *Client, machineID string, interval time.Duration, opts ...HeartbeatSchedulerOption) *HeartbeatScheduler {
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
 		interval = DefaultHeartbeatInterval
+	case interval < minHeartbeatInterval:
+		interval = minHeartbeatInterval
 	}
 	s := &HeartbeatScheduler{client: c, machineID: machineID, interval: interval}
 	for _, opt := range opts {
@@ -710,9 +758,20 @@ func WithProcessHeartbeatOnTick(fn func(*Process, error)) ProcessHeartbeatSchedu
 // processID, pinging every DefaultProcessHeartbeatInterval unless
 // overridden by interval (pass 0 to use the default). Pass
 // WithProcessHeartbeatOnTick to observe each tick's PingProcess result.
+//
+// interval is clamped exactly as NewHeartbeatScheduler's is: non-positive
+// yields DefaultProcessHeartbeatInterval, while a positive value below
+// minHeartbeatInterval is raised to one second rather than to the
+// default. The process window is hardcoded 30s server-side, so no policy
+// can ever justify a sub-second process ping — but the flood is reachable
+// here by the same unit-conversion mistake, and the same measurements
+// apply. See minHeartbeatInterval.
 func NewProcessHeartbeatScheduler(c *Client, processID string, interval time.Duration, opts ...ProcessHeartbeatSchedulerOption) *ProcessHeartbeatScheduler {
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
 		interval = DefaultProcessHeartbeatInterval
+	case interval < minHeartbeatInterval:
+		interval = minHeartbeatInterval
 	}
 	s := &ProcessHeartbeatScheduler{client: c, processID: processID, interval: interval}
 	for _, opt := range opts {

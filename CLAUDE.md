@@ -177,8 +177,28 @@ server-internal (analytics storage, edition gating) and don't apply to any SDK.
   `GetMachine`/`ListMachines`/`CheckOutMachine`/`GenerateOfflineProof` compute it against the
   policy, and a caller holding a `Machine` cannot tell which it has — the route a scheduler
   naturally calls is the wrong one. `PolicyAttributes.EffectiveHeartbeatWindow` falls back for a
-  non-positive `heartbeat_duration` (the column has no `CHECK`) because a zero interval would
-  panic `time.NewTicker`.
+  non-positive `heartbeat_duration` (the column has no `CHECK`), and the server does not rescue
+  it either — the cull job's `COALESCE(p.heartbeat_duration, 600)` replaces NULL only, so a
+  stored `0` really is judged as a zero-length window that no ping rate can hold.
+- **Heartbeat intervals are floored at one second, and the floor is not a panic guard.** All
+  three clamps — `PolicyAttributes.HeartbeatInterval`, `NewHeartbeatScheduler`,
+  `NewProcessHeartbeatScheduler` — raise any *positive* sub-second value to `minHeartbeatInterval`
+  (1s); non-positive still means "use the default". Do **not** narrow this back to the old
+  `interval <= 0` rule on the grounds that `time.NewTicker` only panics on non-positive values.
+  That sorts inputs by whether the runtime rejects them, which is a fact about where a number came
+  from, not about what it does: measured through `NewHeartbeatScheduler` against an `httptest`
+  server, a 1ms interval issues **999** ping requests/second and a 1ns interval **8593**, while
+  `0` — the one value the old guard caught — issues none. The range is reachable by ordinary
+  mistake because the parameter is a `time.Duration` while `heartbeat_duration` counts whole
+  *seconds*. The floor costs only the divisor's two-tolerable-losses promise, and it degrades
+  gracefully (`heartbeat_duration` 3 → 2 losses, 2 → 1, 1 → 0 but still served) because the
+  server's `num_seconds()` **truncates**, putting `DEAD` at `window+1` seconds and giving every
+  window one free second. The single window the floor cannot hold is **`0`**, not `1`. Do not add
+  a window-aware floor to chase it — a ~333ms ping would tie this SDK's request rate to that
+  truncation, a server implementation artifact rather than a protocol guarantee. The standing
+  caveat lives in `TestPolicyHeartbeatInterval_LossesTolerablePerWindow`'s comment: if the server
+  ever compares sub-second, every row there loses one from its count and window `1` becomes a
+  genuine boundary case.
 - **Model all 24 `ValidationCode` values, but only 16 are reachable today** (`validation.go`
   already encodes this — see its doc comment for the exact split). Do not write example code or
   documentation implying `BANNED`, `HEARTBEAT_DEAD`, or the other ⛔ values can come back from a

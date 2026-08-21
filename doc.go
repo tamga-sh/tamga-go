@@ -107,6 +107,13 @@
 //	}
 //	go tamga.NewHeartbeatScheduler(client, machineID, interval).Run(ctx)
 //
+// Every interval this package schedules is floored at one second. A
+// non-positive interval still means "use the default"; a positive one
+// below a second is raised to exactly a second, because time.NewTicker
+// panics only on non-positive values while time.NewTicker(time.Millisecond)
+// legally ticks a thousand times a second. See PolicyAttributes.HeartbeatInterval
+// for what the floor costs against each policy-expressible window.
+//
 // Do not try to derive it from a Machine's NextHeartbeatAt: that field is
 // computed against the policy on some routes and against the 600s
 // fallback on others, and a client holding a Machine cannot tell which it

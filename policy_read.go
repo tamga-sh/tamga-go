@@ -12,12 +12,23 @@ import (
 // own Policy::effective_heartbeat_duration_secs, which is what both the
 // heartbeat-status computation and the cull job's COALESCE read.
 //
-// A non-positive HeartbeatDuration also yields the fallback. The column
-// carries no CHECK constraint, so an operator can store 0 or a negative
-// value, and no ping rate satisfies a zero-length window — while a
-// zero-valued interval derived from it would panic a time.Ticker. There
-// is no useful answer in that case, so this returns the one safe number
-// rather than propagating the misconfiguration into a scheduler.
+// A non-positive HeartbeatDuration also yields the fallback, and that is
+// deliberately NOT the one-second floor HeartbeatInterval applies. The
+// column carries no CHECK constraint, so an operator can store 0 or a
+// negative value, and the server does not rescue it either — the cull
+// job's COALESCE(p.heartbeat_duration, 600) replaces NULL only, so a
+// stored 0 really is judged as a zero-length window. No ping rate
+// satisfies one: with DEAD first read at window+1 seconds, a zero window
+// is DEAD from one second after every ping, so flooring to a second here
+// would buy nothing and merely spend 200x the request rate failing. This
+// returns the one safe number instead, which is the more conservative
+// reading of the same rate-bounding rule the floor enforces.
+//
+// Because HeartbeatDuration counts whole seconds, every value this
+// returns is either that fallback or at least one second — there is no
+// positive sub-second window to raise. The sub-second value the policy
+// path can actually produce is the *interval*, which is why the floor
+// lives on HeartbeatInterval below rather than here.
 //
 // ⚠️ This is the window, not the ping interval. Ping at a fraction of it
 // — HeartbeatInterval is window/3, the same ratio DefaultHeartbeatInterval
@@ -31,7 +42,10 @@ func (a PolicyAttributes) EffectiveHeartbeatWindow() time.Duration {
 
 // HeartbeatInterval is the ping interval this policy calls for:
 // EffectiveHeartbeatWindow divided by three, the same ratio
-// DefaultHeartbeatInterval applies to the 600s fallback.
+// DefaultHeartbeatInterval applies to the 600s fallback, floored at
+// minHeartbeatInterval so a short window can never produce a sub-second
+// ping. heartbeat_duration 1 and 2 divide to 333ms and 666ms; both become
+// 1s.
 //
 // Pass it straight to NewHeartbeatScheduler. Doing so is the only way a
 // machine on a policy with a short heartbeat_duration stays inside its
@@ -39,8 +53,31 @@ func (a PolicyAttributes) EffectiveHeartbeatWindow() time.Duration {
 // alone, so a policy asking for 60s is missed by more than three windows
 // per tick and the machine reads DEAD between every ping — and is culled
 // outright if that policy also sets require_heartbeat.
+//
+// The floor costs less than it looks, and the arithmetic is not obvious.
+// The server compares age_secs <= window_secs and its num_seconds()
+// TRUNCATES, so a machine first reads DEAD at an age of window+1 seconds
+// and every window carries one free second. What the floor does cost is
+// the divisor's promise of two tolerable consecutive losses, and it
+// degrades gracefully rather than breaking:
+//
+//	heartbeat_duration | interval | DEAD at age | consecutive losses tolerated
+//	               600 |     200s |        601s | 2
+//	                 3 |       1s |          4s | 2  — floor and divisor first agree
+//	                 2 |       1s |          3s | 1
+//	                 1 |       1s |          2s | 0  — still served; one ping must land
+//	                 0 |     200s |          1s | not held (see EffectiveHeartbeatWindow)
+//
+// So the value the floor cannot serve is 0, not 1. Do not add a
+// window-aware floor to chase it: serving a zero window needs a ~333ms
+// ping, which would tie this SDK's request rate to num_seconds()
+// truncation — a server implementation artifact, not a protocol
+// guarantee — for one nonsensical setting.
 func (a PolicyAttributes) HeartbeatInterval() time.Duration {
-	return a.EffectiveHeartbeatWindow() / 3
+	if interval := a.EffectiveHeartbeatWindow() / 3; interval > minHeartbeatInterval {
+		return interval
+	}
+	return minHeartbeatInterval
 }
 
 // GetPolicy reads a policy by ID.

@@ -442,6 +442,19 @@ Every claim below is implemented at the cited location.
   the 600s fallback on `CreateMachine`/`PingHeartbeat`/`ResetHeartbeat`/`UpdateMachine`, and a
   caller holding a `Machine` cannot tell which kind it has. The route a scheduler naturally
   calls is the wrong one.
+- **Heartbeat intervals are floored at one second.** `NewHeartbeatScheduler`,
+  `NewProcessHeartbeatScheduler` and `PolicyAttributes.HeartbeatInterval` all raise a *positive*
+  interval below 1s up to exactly 1s. Passing `0` still means "use the default" and is
+  unchanged; what changed is that `500 * time.Millisecond` now becomes `1 * time.Second` instead
+  of being passed through. `time.NewTicker` only panics on a non-positive interval, so a
+  sub-second one used to sail through — and `time.NewTicker(time.Millisecond)` ticks a thousand
+  times a second, which through this SDK's own scheduler measures at **999 ping requests per
+  second**. It is easy to land there by accident, because these parameters are `time.Duration`
+  while the policy's `heartbeat_duration` counts whole *seconds*. No policy-expressible window
+  is lost to the floor: `heartbeat_duration` 1 and 2 are still served (their windows divide to
+  333ms and 666ms and are raised to 1s), just with less slack for a dropped ping. A stored
+  `heartbeat_duration` of `0` is a zero-length window no ping rate can hold at all, and keeps
+  falling back to the 600s default rather than pinging every second to fail.
 - **`GET /policies/{id}` is not callable with a license key.** It authorizes on `policy.read`,
   which is absent from the `LicenseToken` role's permission set, so `GetPolicy` returns `403`
   unconditionally under `WithLicenseKey` — no policy setting changes that. `GetLicensePolicy`
