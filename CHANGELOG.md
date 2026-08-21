@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.4](https://github.com/tamga-sh/tamga-go/compare/v1.2.3...v1.2.4) (2026-08-21)
+
+
+### Bug Fixes
+
+* stop claiming the rate-limit headers are never set ([5fa64bc](https://github.com/tamga-sh/tamga-go/commit/5fa64bcb2c7206bfea035efa4dd787d1b267bb3f))
+* stop claiming the rate-limit headers are never set ([7783bfe](https://github.com/tamga-sh/tamga-go/commit/7783bfe13ba0ea3c4da93be1a731cf42de109432))
+
 ## [1.2.3](https://github.com/tamga-sh/tamga-go/compare/v1.2.2...v1.2.3) (2026-08-21)
 
 
