@@ -10,12 +10,20 @@ import "time"
 // — callers that only recognize known constants should fall back to a
 // default case on switch.
 //
-// Only 14 of the 24 values below are reachable against the current server
+// Only 16 of the 24 values below are reachable against the current server
 // implementation; the rest are declared for schema completeness and
 // forward-compatibility. Each constant below is marked reachable (✅) or
 // not (⛔) as of the server behavior documented in the Tamga API protocol
 // specification §2 — do not build product logic around a ⛔ value returning
 // from a live call today.
+//
+// ENTITLEMENTS_MISSING and FINGERPRINT_SCOPE_MISMATCH moved from ⛔ to ✅:
+// the server now genuinely enforces scope.entitlements and
+// scope.fingerprint. VERSION_SCOPE_MISMATCH and CHECKSUM_SCOPE_MISMATCH
+// are still ⛔ but for a new reason — the server no longer ignores those
+// two scope fields, it rejects the whole call with 422
+// SCOPE_NOT_SUPPORTED, so neither code can ever be the outcome. See
+// Scope in license.go.
 type ValidationCode string
 
 const (
@@ -56,7 +64,11 @@ const (
 	ValidationCodeNotFound ValidationCode = "NOT_FOUND"
 	// ValidationCodeBanned declared in the enum, never emitted. ⛔ unreachable.
 	ValidationCodeBanned ValidationCode = "BANNED"
-	// ValidationCodeEntitlementsMissing declared in the enum, never emitted. ⛔ unreachable.
+	// ValidationCodeEntitlementsMissing scope.entitlements listed a code
+	// the license does not hold, counting both directly-attached and
+	// policy-inherited entitlements. Codes are compared
+	// case-insensitively and de-duplicated; an empty list asserts
+	// nothing. ✅ reachable.
 	ValidationCodeEntitlementsMissing ValidationCode = "ENTITLEMENTS_MISSING"
 	// ValidationCodeTooManyUsers declared in the enum, never emitted. ⛔ unreachable.
 	ValidationCodeTooManyUsers ValidationCode = "TOO_MANY_USERS"
@@ -64,16 +76,19 @@ const (
 	ValidationCodeHeartbeatDead ValidationCode = "HEARTBEAT_DEAD"
 	// ValidationCodeHeartbeatNotStarted declared in the enum, never emitted. ⛔ unreachable.
 	ValidationCodeHeartbeatNotStarted ValidationCode = "HEARTBEAT_NOT_STARTED"
-	// ValidationCodeFingerprintScopeMismatch the scope.fingerprint field is
-	// parsed but not checked server-side. ⛔ unreachable.
+	// ValidationCodeFingerprintScopeMismatch scope.fingerprint matched no
+	// machine registered on the license. Any machine counts, whatever its
+	// heartbeat status. ✅ reachable.
 	ValidationCodeFingerprintScopeMismatch ValidationCode = "FINGERPRINT_SCOPE_MISMATCH"
 	// ValidationCodeComponentsScopeMismatch declared in the enum, never emitted. ⛔ unreachable.
 	ValidationCodeComponentsScopeMismatch ValidationCode = "COMPONENTS_SCOPE_MISMATCH"
-	// ValidationCodeChecksumScopeMismatch the scope.checksum field is
-	// parsed but not checked server-side. ⛔ unreachable.
+	// ValidationCodeChecksumScopeMismatch unreachable by construction:
+	// sending scope.checksum makes the server reject the request with
+	// 422 SCOPE_NOT_SUPPORTED before validation runs, so this code can
+	// never be the outcome. Scope.MarshalJSON drops the field. ⛔ unreachable.
 	ValidationCodeChecksumScopeMismatch ValidationCode = "CHECKSUM_SCOPE_MISMATCH"
-	// ValidationCodeVersionScopeMismatch the scope.version field is parsed
-	// but not checked server-side. ⛔ unreachable.
+	// ValidationCodeVersionScopeMismatch unreachable by construction, for
+	// the same reason as CHECKSUM_SCOPE_MISMATCH. ⛔ unreachable.
 	ValidationCodeVersionScopeMismatch ValidationCode = "VERSION_SCOPE_MISMATCH"
 )
 

@@ -57,21 +57,26 @@ func main() {
 	}
 	ctx := context.Background()
 
-	// ActivateMachine composes CreateMachine + ValidateByID, deleting the
-	// just-created machine again if validation comes back over-limit
-	// (TOO_MANY_MACHINES/TOO_MANY_CORES/etc.) — see machine.go's doc
-	// comment for why creation alone never enforces limits. On that
-	// rollback path it returns a nil *Machine and an error matching
-	// ErrMachineOverLimit — the machine has already been deleted
-	// server-side by the time it returns, so check err before touching
-	// the returned machine.
+	// ActivateMachine composes CreateMachine + ValidateByID. A policy
+	// limit can stop it at either step and both are reported the same
+	// way — a nil *Machine plus an error matching ErrMachineOverLimit,
+	// with meta carrying the exact code:
+	//
+	//   - Under a strict policy the server refuses creation outright
+	//     (422 MACHINE_LIMIT_EXCEEDED and friends); no row exists, so
+	//     nothing is rolled back.
+	//   - Under an overage strategy creation succeeds and the limit only
+	//     surfaces at validate; ActivateMachine deletes the row it just
+	//     created before returning.
+	//
+	// Either way, check err before touching the returned machine.
 	machine, meta, err := client.ActivateMachine(ctx, tamga.CreateMachineOptions{
 		Fingerprint: *fingerprint,
 		LicenseID:   *licenseID,
 	}, nil)
 	if err != nil {
 		if errors.Is(err, tamga.ErrMachineOverLimit) {
-			log.Fatalf("activation rejected (code=%s) — the over-limit machine row has already been rolled back", meta.Code)
+			log.Fatalf("activation rejected: over policy limit (code=%s); no machine is registered", meta.Code)
 		}
 		log.Fatalf("ActivateMachine: %v", err)
 	}
@@ -80,7 +85,36 @@ func main() {
 	if *heartbeat {
 		hbCtx, cancel := context.WithTimeout(ctx, 3*tamga.DefaultHeartbeatInterval)
 		defer cancel()
-		scheduler := tamga.NewHeartbeatScheduler(client, machine.ID, 0 /* use the recommended default interval */)
+
+		// No heartbeat_status is a stop condition, so this callback logs
+		// whatever comes back and lets the loop keep ticking. The one
+		// signal that ends it is a 404 from the ping — the row is genuinely
+		// gone. That, and only that, is where re-activation belongs.
+		//
+		// There is deliberately no `case ... == tamga.HeartbeatDead` here.
+		// A ping writes last_heartbeat_at = NOW() and then derives the
+		// status from that same timestamp, so its response is always ALIVE
+		// or RESURRECTED; such a branch would be dead code on this route.
+		// DEAD does reach this SDK — through CheckOutMachine and
+		// GenerateOfflineProof, which read the machine instead of writing
+		// it. Handle it there, not in a heartbeat tick.
+		onTick := func(m *tamga.Machine, tickErr error) {
+			switch {
+			case errors.Is(tickErr, tamga.ErrNotFound):
+				fmt.Println("heartbeat: machine row is gone (404) — re-activate here")
+				cancel()
+			case tickErr != nil:
+				fmt.Printf("heartbeat: ping failed (will retry on the next tick): %v\n", tickErr)
+			default:
+				fmt.Printf("heartbeat: status %s\n", m.Attributes.HeartbeatStatus)
+			}
+		}
+
+		// Interval 0 takes DefaultHeartbeatInterval, which is window/3 of
+		// the server's 600s *fallback* window. That is only correct for a
+		// policy that leaves heartbeat_duration null; a policy with a
+		// shorter window needs an explicit interval passed here.
+		scheduler := tamga.NewHeartbeatScheduler(client, machine.ID, 0 /* use the recommended default interval */, tamga.WithHeartbeatOnTick(onTick))
 		fmt.Println("running heartbeat scheduler for a few ticks (this will take a while at the real ~200s default interval)...")
 		if runErr := scheduler.Run(hbCtx); runErr != nil {
 			fmt.Printf("heartbeat scheduler stopped: %v\n", runErr)

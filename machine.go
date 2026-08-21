@@ -3,6 +3,7 @@ package tamga
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -20,11 +21,35 @@ type Machine struct {
 }
 
 // MachineAttributes is the attribute bag of a Machine resource.
+//
+// ⚠️ Memory and Disk are MEGABYTES, not bytes. The server's `machines`
+// table documents the unit on the column itself, and the same values feed
+// the license's machines_memory_count/machines_disk_count aggregates that
+// MEMORY_LIMIT_EXCEEDED/DISK_LIMIT_EXCEEDED are checked against. Reporting
+// 16 GiB as 17179869184 rather than 16384 inflates those counters by a
+// factor of 1048576 and trips the limit on the license's very next
+// activation.
+//
+// NextHeartbeatAt is the server's own view of when the next ping is due:
+// last_heartbeat_at plus the effective window. Which window that is
+// depends on which route answered, so enumerate rather than generalize:
+//
+//	CreateMachine, PingHeartbeat, ResetHeartbeat  600s fallback
+//	UpdateMachine (PATCH)                         600s fallback
+//	CheckOutMachine, GenerateOfflineProof         policy.heartbeat_duration
+//	GetMachine, ListMachines                      policy.heartbeat_duration
+//
+// The split is not write-versus-read: UpdateMachine is a write that lands
+// on the fallback side because its UPDATE … RETURNING omits the policies
+// join. Two responses for the same machine seconds apart can therefore
+// disagree about this field, and a caller holding a Machine cannot tell
+// which kind it has — so never size a ping interval from it. Read the
+// policy instead: Client.HeartbeatIntervalForLicense.
 type MachineAttributes struct {
 	Platform        *string         `json:"platform"`
 	NextHeartbeatAt *string         `json:"next_heartbeat_at"`
-	Memory          *int64          `json:"memory"`
-	Disk            *int64          `json:"disk"`
+	Memory          *int64          `json:"memory"` // megabytes, not bytes
+	Disk            *int64          `json:"disk"`   // megabytes, not bytes
 	IP              *string         `json:"ip"`
 	Hostname        *string         `json:"hostname"`
 	Cores           *int32          `json:"cores"`
@@ -43,15 +68,61 @@ type MachineAttributes struct {
 // so an unrecognized wire value decodes cleanly rather than failing
 // (forward-compatible with a future server-side addition).
 //
-// The window is a hardcoded 600s (10 min), not driven by
-// policy.heartbeat_duration despite that field existing on Policy
-// (the Tamga API protocol specification's Known Server-Side Gaps #8).
-// Treat DEAD as "machine likely deleted server-side — re-activate rather
-// than retry ping," per the policy's HeartbeatCullStrategy.
+// The window is policy-driven: the server judges a machine against its
+// policy's heartbeat_duration when that field is set, and falls back to
+// 600s (10 min) only when it is null.
+//
+// ⚠️ DefaultHeartbeatInterval does not adapt to it.
+// machineHeartbeatWindow — and so DefaultHeartbeatInterval, which is
+// derived from it — is computed against the 600s fallback alone. On a
+// policy that sets a shorter heartbeat_duration that default ping rate is
+// too slow: the machine goes stale between ticks and reads DEAD. Read the
+// real window with Client.HeartbeatIntervalForLicense and pass the result
+// to NewHeartbeatScheduler.
+//
+// The rule for a heartbeat loop is positive and status-independent: do
+// not stop on ANY status. The only terminal signal from a ping is a 404
+// NOT_FOUND — errors.Is(err, ErrNotFound), meaning the row is gone. Hang
+// re-activation off that, and off nothing else.
+//
+// ⚠️ Which statuses you can actually observe depends on the route, and
+// DEAD is not one of them on the heartbeat routes. Client.PingHeartbeat
+// writes last_heartbeat_at = NOW() and then derives the status from that
+// same timestamp, so its response is always ALIVE or RESURRECTED;
+// Client.ResetHeartbeat nulls the column and Client.CreateMachine never
+// sets it, so both answer NOT_STARTED. A `case DEAD` branch written
+// against any of those three is dead code.
+//
+// DEAD does reach callers of this SDK, and the durable form of the rule
+// is not write-versus-read: it is whether the response was built off a
+// last_heartbeat_at that this same request just wrote. A response derived
+// from a timestamp the request set can never say DEAD; one derived from
+// an untouched timestamp can. The routes here that can report it are
+// Client.GetMachine, Client.ListMachines, Client.CheckOutMachine (on
+// MachinePayload.Data, after MachineFile.Verify),
+// Client.GenerateOfflineProof (on the *Machine it returns) and
+// Client.UpdateMachine — the last being a write that never touches the
+// heartbeat columns, which is why the write-versus-read shorthand is only
+// an approximation. Handle DEAD when reading any of those; ignore it on a
+// ping.
+//
+// Wherever it does appear, DEAD means ONLY "the last ping is older than
+// the heartbeat window." It does NOT mean the machine row was culled,
+// deleted, or deactivated, and it does not mean the seat was released. The server computes the status purely from last_heartbeat_at
+// versus the window and never consults the policy's require_heartbeat
+// flag, so a machine reports DEAD *forever* while its row — and its seat
+// — are still there. Culling is a separate background job that
+// early-returns for any policy with require_heartbeat = false, and that
+// column defaults to FALSE: on a default policy nothing is ever culled,
+// whatever HeartbeatCullStrategy says. So even a DEAD read off a checkout
+// is not a reason to stop pinging: Client.PingHeartbeat revives the
+// machine whatever state it was in, its update being a bare
+// last_heartbeat_at = NOW() with no resurrection check gating it.
 type HeartbeatStatus string
 
 // Heartbeat status constants — see HeartbeatStatus's doc comment for the
-// state machine and the hardcoded-window gotcha.
+// state machine, and for why the window this is judged against is the
+// policy's rather than the one this SDK schedules on.
 const (
 	HeartbeatNotStarted  HeartbeatStatus = "NOT_STARTED"
 	HeartbeatAlive       HeartbeatStatus = "ALIVE"
@@ -59,20 +130,58 @@ const (
 	HeartbeatResurrected HeartbeatStatus = "RESURRECTED"
 )
 
-// machineHeartbeatWindow is the hardcoded 600-second (10 min) machine
-// heartbeat window — see HeartbeatStatus's doc comment.
+// machineHeartbeatWindow is the server's 600-second (10 min) *fallback*
+// machine heartbeat window, which applies only to a policy that leaves
+// heartbeat_duration null. It is a constant because it backs
+// DefaultHeartbeatInterval, which has to have a value before any policy
+// has been read; PolicyAttributes.EffectiveHeartbeatWindow returns the
+// same number for a policy that leaves the field null and the policy's
+// own value otherwise.
 const machineHeartbeatWindow = 600 * time.Second
+
+// minHeartbeatInterval is the shortest ping interval this SDK will
+// schedule. Both heartbeat scheduler constructors and the policy-derived
+// PolicyAttributes.HeartbeatInterval raise any *positive* value below it
+// to exactly this, so no code path in this package can hand a sub-second
+// interval to a time.Ticker.
+//
+// The floor replaced a narrower "non-positive only" guard, because
+// bounding the request *rate* is the safety property and Go's own guard
+// bounds only the *panic*. time.NewTicker rejects a non-positive interval
+// outright — "non-positive interval for NewTicker" — which is the whole
+// reason the old clamp existed; but one representable value up,
+// time.NewTicker(time.Millisecond) is perfectly legal and ticks a
+// thousand times a second. Measured through NewHeartbeatScheduler itself
+// against an httptest server: a 1ms interval issues 999 ping requests per
+// second and a 1ns interval issues 8593, while 0 — the one input the old
+// clamp did catch — issues none, because it became the 200s default. A
+// rule that guards only what the runtime refuses is a rule about where a
+// number came from, not about what it does.
+//
+// The range is reachable by ordinary mistake rather than only by abuse:
+// this package's interval parameters are time.Duration, while the policy
+// field behind them, heartbeat_duration, counts whole *seconds*. A caller
+// converting units by hand lands directly in it.
+//
+// One second costs nothing against any window the server can express; the
+// arithmetic is in PolicyAttributes.HeartbeatInterval's doc comment and is
+// pinned by TestPolicyHeartbeatInterval_LossesTolerablePerWindow.
+const minHeartbeatInterval = time.Second
 
 // CreateMachineOptions configures CreateMachine. Fingerprint and LicenseID
 // are required; every other field is optional.
+//
+// ⚠️ Memory and Disk are MEGABYTES, not bytes — see MachineAttributes'
+// doc comment for why reporting bytes here corrupts the license's
+// memory/disk counters permanently.
 type CreateMachineOptions struct {
 	Name        *string
 	IP          *string
 	Hostname    *string
 	Platform    *string
 	Cores       *int32
-	Memory      *int64
-	Disk        *int64
+	Memory      *int64 // megabytes, not bytes
+	Disk        *int64 // megabytes, not bytes
 	Metadata    map[string]any
 	Fingerprint string
 	LicenseID   string
@@ -85,11 +194,24 @@ type CreateMachineOptions struct {
 // fingerprint on the same license fails with an error matching
 // ErrFingerprintTaken (via errors.Is).
 //
-// No machine/core/etc. limit is checked at creation time — those limits
-// only surface later via license validation (ValidateByID). The machine
-// row may already exist even if the license is over its limit; the caller
-// is responsible for deleting it if the desired UX is "reject over-limit
-// activation" — see ActivateMachine, which does exactly that.
+// Machine/core/memory/disk limits ARE checked at creation time: the
+// server refuses with a 422 carrying MACHINE_LIMIT_EXCEEDED,
+// CORE_LIMIT_EXCEEDED, MEMORY_LIMIT_EXCEEDED, or DISK_LIMIT_EXCEEDED
+// (match with errors.Is against ErrMachineLimitExceeded and friends).
+// That check runs through the policy's overage strategy, exactly like the
+// one validation runs — so it is NOT a guarantee that a successfully
+// created machine is inside its limits. Under ALLOW_1_25X_OVERAGE (or
+// any of the other permissive strategies) creation succeeds past the
+// nominal max and the overage only surfaces later, as a TOO_MANY_*/
+// TOO_MUCH_* ValidationCode from ValidateByID.
+//
+// Both paths therefore have to be handled to implement "reject
+// over-limit activation" — see ActivateMachine, which does exactly that
+// and normalizes the two vocabularies onto one error.
+//
+// The uniqueness pre-check runs BEFORE the limit checks, so a
+// re-activation of an already-registered fingerprint reports
+// FINGERPRINT_TAKEN rather than a misleading limit error.
 func (c *Client) CreateMachine(ctx context.Context, opts CreateMachineOptions) (*Machine, error) {
 	metadata := opts.Metadata
 	if metadata == nil {
@@ -141,23 +263,71 @@ func isOverageCode(code ValidationCode) bool {
 	}
 }
 
+// createTimeLimitCode maps a create-time 422 error code
+// (MACHINE_LIMIT_EXCEEDED and friends, raised by POST /machines before
+// any row is written) onto the equivalent ValidationCode that the same
+// limit would produce from a validate call.
+//
+// The two vocabularies exist because the checks live in different server
+// modules, but they describe the same four limits. Normalizing here is
+// what lets ActivateMachine hand every caller a single *ValidationMeta
+// shape regardless of which code path caught the overage — a caller
+// switching on meta.Code does not have to learn both spellings.
+//
+// Returns ("", false) for any code that is not a create-time limit
+// refusal, so the caller can fall through and propagate the *APIError
+// unchanged.
+func createTimeLimitCode(code string) (ValidationCode, bool) {
+	switch code {
+	case "MACHINE_LIMIT_EXCEEDED":
+		return ValidationCodeTooManyMachines, true
+	case "CORE_LIMIT_EXCEEDED":
+		return ValidationCodeTooManyCores, true
+	case "MEMORY_LIMIT_EXCEEDED":
+		return ValidationCodeTooMuchMemory, true
+	case "DISK_LIMIT_EXCEEDED":
+		return ValidationCodeTooMuchDisk, true
+	default:
+		return "", false
+	}
+}
+
 // ActivateMachine composes CreateMachine and ValidateByID into the
 // recommended "activate machine" flow: create the machine, then validate
-// its license. If validation returns an over-limit ValidationCode
-// (TOO_MANY_MACHINES/TOO_MANY_CORES/TOO_MUCH_MEMORY/TOO_MUCH_DISK/
-// TOO_MANY_PROCESSES), the just-created machine is deleted before
-// returning — implementing "reject over-limit activation" instead of
-// leaving an orphaned machine row behind (see CreateMachine's doc comment
-// for why creation alone doesn't enforce limits).
+// its license. A policy limit can stop that flow at either step, and
+// ActivateMachine reports both the same way — (nil, meta, err) with err
+// matching ErrMachineOverLimit (via errors.Is), NOT (machine, meta, nil).
 //
-// On that rollback path, ActivateMachine returns (nil, meta, err) with err
-// matching ErrMachineOverLimit (via errors.Is) — NOT (machine, meta, nil).
-// The machine has already been deleted server-side by the time this
-// returns, so branching on the returned machine without first checking err
-// would hand you a stale, deleted machine's ID as if activation had
-// succeeded. meta is still populated so callers that want the exact
+// Step 1 — creation refused (422). The server enforces the machine, core,
+// memory, and disk limits at creation time, so under a strict policy the
+// request never produces a row. ActivateMachine short-circuits here: it
+// normalizes the create-time code onto its ValidationCode equivalent
+// (MACHINE_LIMIT_EXCEEDED → TOO_MANY_MACHINES, CORE_ → TOO_MANY_CORES,
+// MEMORY_ → TOO_MUCH_MEMORY, DISK_ → TOO_MUCH_DISK), synthesizes a
+// *ValidationMeta carrying it, and returns without calling DeleteMachine
+// — there is no row to roll back, and issuing a delete against an ID that
+// was never assigned would be a spurious call at best.
+//
+// Step 2 — creation succeeded, validation reports the overage. The
+// create-time check runs through the policy's overage strategy, so a
+// license under ALLOW_1_25X_OVERAGE (or ALWAYS_ALLOW_OVERAGE) is created
+// past its nominal max and only reports TOO_MANY_MACHINES/TOO_MANY_CORES/
+// TOO_MUCH_MEMORY/TOO_MUCH_DISK/TOO_MANY_PROCESSES from the validate
+// call. Here the machine row does exist, so ActivateMachine deletes it
+// before returning — implementing "reject over-limit activation" instead
+// of leaving an orphaned row behind. This rollback path is unchanged and
+// is still the path a permissive policy takes.
+//
+// In both cases the returned *Machine is nil: branching on it without
+// first checking err would hand you either a machine that was never
+// created or a stale, already-deleted ID, as if activation had succeeded.
+// meta is populated either way so callers that want the exact
 // ValidationCode (to decide messaging, retry policy, etc.) can inspect it
-// despite the error.
+// despite the error. On the step-1 path meta.TS is the local time the
+// refusal was observed, not a server timestamp — no validation ran.
+//
+// Any non-limit create error (FINGERPRINT_TAKEN, a 401, a network
+// failure) propagates unchanged as (nil, nil, err).
 //
 // Deletion failures during rollback are not surfaced beyond that — the
 // ErrMachineOverLimit/meta pair is what the caller most needs; a machine
@@ -166,6 +336,21 @@ func isOverageCode(code ValidationCode) bool {
 func (c *Client) ActivateMachine(ctx context.Context, opts CreateMachineOptions, scope *Scope) (*Machine, *ValidationMeta, error) {
 	machine, err := c.CreateMachine(ctx, opts)
 	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if code, ok := createTimeLimitCode(apiErr.Err.Code); ok {
+				meta := &ValidationMeta{
+					TS:     time.Now().UTC(),
+					Valid:  false,
+					Code:   code,
+					Detail: apiErr.Err.Detail,
+				}
+				// %w twice keeps both the sentinel and the original
+				// *APIError in the chain, so errors.Is matches
+				// ErrMachineOverLimit and ErrMachineLimitExceeded alike.
+				return nil, meta, fmt.Errorf("%w (code=%s): %w", ErrMachineOverLimit, code, apiErr)
+			}
+		}
 		return nil, nil, err
 	}
 
@@ -185,6 +370,22 @@ func (c *Client) ActivateMachine(ctx context.Context, opts CreateMachineOptions,
 // PingHeartbeat sets last_heartbeat_at = now on a machine.
 // POST /v1/accounts/{account_id}/machines/{id}/actions/ping-heartbeat, no
 // body. Returns the updated machine resource.
+//
+// It works — and revives the machine — whatever the machine's current
+// HeartbeatStatus is. A DEAD machine is still pingable: the server's
+// write is a bare last_heartbeat_at = NOW() with no resurrection check in
+// front of it.
+//
+// ⚠️ That write lands before the response is serialized, and the server
+// derives the returned status from the very timestamp it just wrote — so
+// the Machine returned here always reports ALIVE or RESURRECTED, never
+// DEAD. Never gate a scheduled ping on the previous response's status;
+// there is no status this route can return that means "stop". See
+// HeartbeatStatus.
+//
+// A 404 NOT_FOUND (errors.Is(err, ErrNotFound)) is the one response that
+// does mean the row is gone — the only reliable culled/deleted signal
+// this API exposes, and the only terminal one. Re-activate on that.
 func (c *Client) PingHeartbeat(ctx context.Context, machineID string) (*Machine, error) {
 	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/ping-heartbeat", escapePathSegment(machineID)), nil)
 	if err != nil {
@@ -196,6 +397,20 @@ func (c *Client) PingHeartbeat(ctx context.Context, machineID string) (*Machine,
 // ResetHeartbeat fully rewinds a machine's heartbeat state to
 // NOT_STARTED. POST /v1/accounts/{account_id}/machines/{id}/actions/reset-heartbeat,
 // no body.
+//
+// ⚠️ Not callable with a license key. The server gates this action on the
+// caller's ROLE (admin, developer, product token, or environment token) —
+// not on a permission — and the LicenseToken role is not in that set. A
+// client authenticated with WithLicenseKey therefore gets 403 FORBIDDEN
+// on every call, unconditionally, no matter how the license's policy is
+// configured. Use a BearerAuth token with one of those roles instead.
+//
+// This matters more than the usual "some endpoints need a stronger
+// credential" caveat, because resetting the heartbeat is the only
+// server-side way to unstick a machine whose heartbeat job has wedged. An
+// embedded client that reaches for it as a recovery path finds it is not
+// a recovery path at all. Contrast PingHeartbeat, which is
+// permission-gated with no role gate and works fine with a license key.
 func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine, error) {
 	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/reset-heartbeat", escapePathSegment(machineID)), nil)
 	if err != nil {
@@ -206,10 +421,25 @@ func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine
 
 // HeartbeatScheduler periodically calls PingHeartbeat for one machine
 // until its context is canceled. The recommended default interval is
-// window/3 (~200s for the hardcoded 600s machine window), available as
-// DefaultHeartbeatInterval. Treat a DEAD status observed from a ping's
-// response as "machine likely deleted server-side — re-activate rather
-// than retry ping," per HeartbeatStatus's doc comment.
+// window/3 (~200s against the server's 600s fallback window), available
+// as DefaultHeartbeatInterval. That default assumes the fallback: on a
+// policy that sets a shorter heartbeat_duration it pings too slowly and
+// the machine reads DEAD between ticks. Size the interval from the policy
+// instead — Client.HeartbeatIntervalForLicense does exactly that in one
+// call.
+//
+// No HeartbeatStatus is a stop condition, and Run deliberately keeps
+// pinging whatever comes back. It never inspects the status, and a caller
+// must not cancel on one either. (A ping's response is in fact always
+// ALIVE or RESURRECTED — the server's write lands before the status is
+// computed, so DEAD is not reachable from this route at all; see
+// HeartbeatStatus. The rule holds regardless, which is the point of
+// stating it status-independently.)
+//
+// Re-activate on a 404 NOT_FOUND from the ping instead — that is the only
+// terminal signal, and the only evidence the row is genuinely gone.
+// Observe it with WithHeartbeatOnTick and errors.Is(err, ErrNotFound).
+// See HeartbeatStatus's doc comment for the full server-side story.
 type HeartbeatScheduler struct {
 	client    *Client
 	onTick    func(*Machine, error)
@@ -218,8 +448,11 @@ type HeartbeatScheduler struct {
 }
 
 // DefaultHeartbeatInterval is machineHeartbeatWindow/3 — the recommended
-// default HeartbeatScheduler interval, safely inside the hardcoded 600s
-// machine heartbeat window.
+// default HeartbeatScheduler interval, safely inside the server's 600s
+// fallback window but NOT inside a shorter policy-configured one. Only a
+// policy that leaves heartbeat_duration null is covered by this default;
+// use Client.HeartbeatIntervalForLicense to size the interval from the
+// policy that actually applies.
 const DefaultHeartbeatInterval = machineHeartbeatWindow / 3
 
 // HeartbeatSchedulerOption configures a HeartbeatScheduler built via
@@ -228,12 +461,19 @@ type HeartbeatSchedulerOption func(*HeartbeatScheduler)
 
 // WithHeartbeatOnTick registers fn to be called after every ping attempt
 // (success or error), the only way to observe each tick's outcome from
-// outside this package — in particular, to detect a DEAD HeartbeatStatus
-// on the returned Machine and react per HeartbeatScheduler's doc comment
-// ("re-activate rather than retry ping"), or to log/alert on a failed
-// ping. Without this option, Run() still pings on schedule but a caller
-// has no way to observe the per-tick result short of polling the machine
-// separately.
+// outside this package — in particular, to catch a 404 NOT_FOUND
+// (errors.Is(err, ErrNotFound)) and re-activate, or to log/alert on a
+// failed ping. Without this option, Run() still pings on schedule but a
+// caller has no way to observe the per-tick result short of polling the
+// machine separately.
+//
+// The HeartbeatStatus on the returned Machine is worth logging, but no
+// value of it is a reason to cancel the scheduler, and none is evidence
+// the machine was culled. A ping's response is always ALIVE or
+// RESURRECTED — DEAD is not reachable from this route, so a branch
+// testing for it here is dead code (see HeartbeatStatus). Only the 404
+// means the row is gone. See HeartbeatScheduler's and HeartbeatStatus's
+// doc comments.
 func WithHeartbeatOnTick(fn func(*Machine, error)) HeartbeatSchedulerOption {
 	return func(s *HeartbeatScheduler) { s.onTick = fn }
 }
@@ -242,9 +482,28 @@ func WithHeartbeatOnTick(fn func(*Machine, error)) HeartbeatSchedulerOption {
 // every DefaultHeartbeatInterval unless overridden by interval (pass 0 to
 // use the default). Pass WithHeartbeatOnTick to observe each tick's
 // PingHeartbeat result.
+//
+// interval is clamped two ways, and the two are not the same rule. A
+// non-positive interval means "use the default" and yields
+// DefaultHeartbeatInterval, as it always has. A *positive* interval below
+// minHeartbeatInterval is raised to minHeartbeatInterval — one second —
+// rather than to the default, so that a caller asking for a genuinely
+// short window still gets the shortest interval this SDK will schedule
+// instead of being silently pushed out to 200s. 500ms therefore becomes
+// 1s, not 200s.
+//
+// The floor is a guard on this argument, not an invariant Run rechecks:
+// it exists because a sub-second interval is a request flood
+// (time.NewTicker(time.Millisecond) ticks a thousand times a second and
+// does not panic), and because this parameter is a time.Duration while
+// the policy field behind it counts whole seconds. See
+// minHeartbeatInterval for the measurements.
 func NewHeartbeatScheduler(c *Client, machineID string, interval time.Duration, opts ...HeartbeatSchedulerOption) *HeartbeatScheduler {
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
 		interval = DefaultHeartbeatInterval
+	case interval < minHeartbeatInterval:
+		interval = minHeartbeatInterval
 	}
 	s := &HeartbeatScheduler{client: c, machineID: machineID, interval: interval}
 	for _, opt := range opts {
@@ -257,6 +516,14 @@ func NewHeartbeatScheduler(c *Client, machineID string, interval time.Duration, 
 // ctx.Err(). Intended to be run in its own goroutine:
 //
 //	go scheduler.Run(ctx)
+//
+// Only ctx ends the loop. Every outcome — a failed ping, or a successful
+// one carrying any HeartbeatStatus at all — is reported to
+// WithHeartbeatOnTick and then the loop ticks again. Run never inspects
+// the status, by design: the next ping revives the machine whatever state
+// it was in, so no status is a stop condition. A caller that wants to
+// react to a genuinely deleted row (404 NOT_FOUND) does so from the
+// callback and cancels ctx itself; see HeartbeatScheduler's doc comment.
 func (s *HeartbeatScheduler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -338,25 +605,29 @@ type ComponentPage struct {
 // The response carries no cursor metadata/links of its own — NextCursor is
 // set to the last item's ID when a full page was returned; pass it as the
 // next call's ListOptions.After.
+//
+// Unlike the entitlements listing, page[after] genuinely works here.
+//
+// When ListOptions.Limit is unset, an explicit limit of 100 (the server
+// maximum) is sent rather than letting the server apply its silent
+// 25-row default. Deriving NextCursor requires knowing the page size, and
+// a caller who did not pick one would otherwise get 25 rows, no cursor,
+// and no indication anything was left behind.
 func (c *Client) ListComponents(ctx context.Context, machineID string, opts ListOptions) (*ComponentPage, error) {
 	path := fmt.Sprintf("/machines/%s/components", escapePathSegment(machineID))
+	limit := effectivePageLimit(opts.Limit)
 	query := url.Values{}
-	if opts.Limit > 0 {
-		query.Set("limit", strconv.Itoa(opts.Limit))
-	}
+	query.Set("limit", strconv.Itoa(limit))
 	if opts.After != nil {
 		query.Set("page[after]", *opts.After)
 	}
-	fullPath := path
-	if encoded := query.Encode(); encoded != "" {
-		fullPath += "?" + encoded
-	}
+	fullPath := path + "?" + query.Encode()
 	items, err := decodeJSONAPI[[]Component](ctx, c, "GET", fullPath, nil)
 	if err != nil {
 		return nil, err
 	}
 	page := &ComponentPage{Items: items}
-	if opts.Limit > 0 && len(items) == opts.Limit {
+	if len(items) == limit {
 		last := items[len(items)-1].ID
 		page.NextCursor = &last
 	}
@@ -391,9 +662,9 @@ type ProcessAttributes struct {
 }
 
 // processHeartbeatWindow is the hardcoded 30-second process heartbeat
-// window — much shorter than a machine's 600s, and with no resurrection
-// grace period: a dead process row is deleted immediately, no KEEP_DEAD
-// equivalent (Tamga API protocol specification §8).
+// window — much shorter than a machine's 600s default, and with no
+// resurrection grace period: a dead process row is deleted immediately,
+// no KEEP_DEAD equivalent (Tamga API protocol specification §8).
 const processHeartbeatWindow = 30 * time.Second
 
 // CreateProcessOptions configures CreateProcess. MachineID and PID are
@@ -416,6 +687,11 @@ type CreateProcessOptions struct {
 // ErrPIDTaken. Unlike a machine (which starts NOT_STARTED), a process
 // starts ALIVE immediately — its LastHeartbeatAt is set at creation, not
 // left unset until a first ping.
+//
+// ⚠️ Pair every call with a DeleteProcess on shutdown. Nothing
+// server-side ever reaps a process row whose heartbeat lapsed, and every
+// surviving row counts against the policy's max_processes — see
+// DeleteProcess.
 func (c *Client) CreateProcess(ctx context.Context, opts CreateProcessOptions) (*Process, error) {
 	metadata := opts.Metadata
 	if metadata == nil {
@@ -482,9 +758,20 @@ func WithProcessHeartbeatOnTick(fn func(*Process, error)) ProcessHeartbeatSchedu
 // processID, pinging every DefaultProcessHeartbeatInterval unless
 // overridden by interval (pass 0 to use the default). Pass
 // WithProcessHeartbeatOnTick to observe each tick's PingProcess result.
+//
+// interval is clamped exactly as NewHeartbeatScheduler's is: non-positive
+// yields DefaultProcessHeartbeatInterval, while a positive value below
+// minHeartbeatInterval is raised to one second rather than to the
+// default. The process window is hardcoded 30s server-side, so no policy
+// can ever justify a sub-second process ping — but the flood is reachable
+// here by the same unit-conversion mistake, and the same measurements
+// apply. See minHeartbeatInterval.
 func NewProcessHeartbeatScheduler(c *Client, processID string, interval time.Duration, opts ...ProcessHeartbeatSchedulerOption) *ProcessHeartbeatScheduler {
-	if interval <= 0 {
+	switch {
+	case interval <= 0:
 		interval = DefaultProcessHeartbeatInterval
+	case interval < minHeartbeatInterval:
+		interval = minHeartbeatInterval
 	}
 	s := &ProcessHeartbeatScheduler{client: c, processID: processID, interval: interval}
 	for _, opt := range opts {

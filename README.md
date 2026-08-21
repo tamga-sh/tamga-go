@@ -69,11 +69,92 @@ if err != nil {
 fmt.Println(machine.ID, machine.Attributes.HeartbeatStatus)
 ```
 
-Keep it alive with `NewHeartbeatScheduler(client, machine.ID, tamga.DefaultHeartbeatInterval)`
-and `(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled.
+Keep it alive with `NewHeartbeatScheduler(client, machine.ID, interval)` and
+`(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled. Size `interval`
+from the policy rather than from `DefaultHeartbeatInterval`, which assumes the server's 600s
+fallback window:
+
+```go
+interval, err := client.HeartbeatIntervalForLicense(ctx, license.ID)
+if err != nil {
+	interval = tamga.DefaultHeartbeatInterval // 600s fallback / 3
+}
+```
+
+> **The loop must not stop on any `HeartbeatStatus`.** The only terminal signal from a ping is a
+> **404 `NOT_FOUND`**, which means the row is gone — hang re-activation off
+> `errors.Is(err, tamga.ErrNotFound)` and off nothing else. `Run` is written that way: it never
+> inspects the status, and only context cancellation ends its loop.
+>
+> **`DEAD` is not reachable from the heartbeat routes.** `PingHeartbeat` writes
+> `last_heartbeat_at = NOW()` and then derives the status from that same timestamp, so its
+> response is always `ALIVE` or `RESURRECTED`; `ResetHeartbeat` and `CreateMachine` both answer
+> `NOT_STARTED`. A `case DEAD` branch written against a ping is dead code. It **is** reachable
+> from five routes — `GetMachine`, `ListMachines`, `CheckOutMachine` (on `MachinePayload.Data`,
+> after `MachineFile.Verify`), `GenerateOfflineProof` (on the `*Machine` it returns) and
+> `UpdateMachine` — so handle `DEAD` there. The durable rule is not write-versus-read but
+> whether the response was built off a `last_heartbeat_at` the same request just wrote:
+> `UpdateMachine` is a write that touches none of the heartbeat columns, which is exactly why it
+> can report `DEAD`. Wherever it appears it means only that the last ping is
+> older than the window, **not** that the machine was culled: the server never looks at the
+> policy's `require_heartbeat` flag when computing it, and the culling job early-returns unless
+> that flag is set — which it is **not**, by default. A machine can report `DEAD` forever with
+> its row and its seat intact.
+>
+> ```go
+> hbCtx, cancel := context.WithCancel(ctx)
+> defer cancel()
+> scheduler := tamga.NewHeartbeatScheduler(client, machine.ID, 0,
+> 	tamga.WithHeartbeatOnTick(func(m *tamga.Machine, err error) {
+> 		if errors.Is(err, tamga.ErrNotFound) {
+> 			// The row is genuinely gone — this, and only this, is the
+> 			// re-activation trigger.
+> 			cancel()
+> 			return
+> 		}
+> 		// Log m.Attributes.HeartbeatStatus if you like, but never branch
+> 		// the loop on it — no status is a stop condition.
+> 	}))
+> go scheduler.Run(hbCtx)
+> ```
 
 `examples/` holds runnable programs for validation, check-in, license/machine file verification,
 the machine lifecycle, and entitlement checks — `go run ./examples/validate -h` to start.
+
+### Reads, cleanup and the rest of the surface
+
+| Call | Route | Notes |
+|---|---|---|
+| `GetMachine(id)` | `GET /machines/{id}` | Joins the policy, so `HeartbeatStatus` and `NextHeartbeatAt` are real. Can report `DEAD`. |
+| `ListMachines(opts)` | `GET /machines` | **Offset**-paginated (`MachinePage.Page`). Filters: license/owner/group/platform plus free-text `Query`. **No fingerprint filter.** |
+| `UpdateMachine(id, opts)` | `PATCH /machines/{id}` | Enveloped body. Omitted fields are unchanged and cannot be cleared to NULL. Heartbeat fields on the response use the 600s fallback. |
+| `FindMachineByFingerprint(licenseID, fp)` | — | `filter[q]` narrowing plus a client-side exact match, scoped to one license. |
+| `ActivateMachineIdempotent(opts, scope)` | — | `ActivateMachine`, but a `409 FINGERPRINT_TAKEN` is recovered into the existing machine instead of raised. |
+| `ListMachineProcesses(id, opts)` | `GET /machines/{id}/processes` | Keyset, unlike its parent collection. |
+| `DeleteProcess(id)` | `DELETE /processes/{id}` | The only cleanup there is — nothing reaps process rows server-side. |
+| `GetLicense(id)` | `GET /licenses/{id}` | A read, not a verdict; does not touch `last_validated_at`. |
+| `GetLicensePolicy(id)` | `GET /licenses/{id}/policy` | The policy read that works under a license key. |
+| `GetPolicy(id)` | `GET /policies/{id}` | Needs `policy.read`; **403s under a license key**. |
+| `HeartbeatIntervalForLicense(id)` | — | The policy's window / 3, ready for `NewHeartbeatScheduler`. |
+| `CheckUpgrade(opts)` | `GET /releases/actions/upgrade` | Four required query params; `offered == false` is **not** "up to date". |
+| `Health()` | `GET /v1/health` | Sent with **no credential** and no account prefix; flat body, not JSON:API. |
+
+Re-activating a machine that is already registered is a `409 FINGERPRINT_TAKEN` from
+`ActivateMachine`, because the server checks uniqueness before its quota limits so that a
+re-activation is not misreported as a limit failure. `ActivateMachineIdempotent` turns that into
+a no-op:
+
+```go
+machine, meta, err := client.ActivateMachineIdempotent(ctx, opts, nil)
+```
+
+It looks the existing machine up scoped to the caller's own license and returns it. When the
+fingerprint is taken on a **different** license — possible under `UNIQUE_PER_POLICY` or
+`UNIQUE_PER_ACCOUNT` — the lookup finds nothing and the original `409` is re-raised rather than
+resolved: adopting that row would attach the caller to a seat its license does not own, and a
+machine resource carries no `license_id` with which it could ever notice. Unlike
+`ActivateMachine`, an over-limit verdict on the recovery path does **not** delete the machine —
+it was already there.
 
 ## Auth transports
 
@@ -93,7 +174,20 @@ param, but the SDK sends only the transport you configure).
 | Query parameter | `?token=<token>` | `WithAuth(tamga.QueryParamAuth{Token: token})` |
 
 Every request also carries `Tamga-Version` (`DefaultAPIVersion`, overridable with
-`WithAPIVersion`) and, if set, `Tamga-OTP` via `WithOTP`.
+`WithAPIVersion`) and, if set, `Tamga-OTP` via `WithOTP`. Requests are bounded by
+`DefaultTimeout` (45s) unless you supply your own `*http.Client` via `WithHTTPClient`.
+
+> **License-key auth is off by default server-side.** The license's policy must set
+> `authentication_strategy` to `LICENSE` or `MIXED`; the column defaults to `TOKEN`, under which
+> every license-key request fails `401 LICENSE_NOT_ALLOWED` (match with `errors.Is(err,
+> tamga.ErrLicenseNotAllowed)`). That is a configuration precondition, not a transient failure —
+> retrying or re-entering the key will not fix it. Two other 401s come from the same gate:
+> `ErrLicenseSuspended`, and `ErrLicenseExpired` (only when the policy's expiration strategy is
+> `REVOKE_ACCESS`; under the other three an expired license still authenticates and reports
+> `EXPIRED` from a validate call). A license key also authenticates as a narrower role than a
+> bearer token: `ResetHeartbeat` and `GenerateOfflineProof` are role-gated above it and return
+> `403` unconditionally — use a bearer token with an admin/developer/product/environment role
+> for those two.
 
 ## Offline verification
 
@@ -149,9 +243,13 @@ Set `LicenseFile.Now` to a server-supplied timestamp if you do not want to trust
 
 ### Machine files (`.machine`)
 
-Same envelope, but the signing algorithm is chosen by the governing license's own `Scheme` —
-never by parsing the file's self-declared `alg` — and decryption needs both the license key and
-the target machine's fingerprint.
+Same envelope and the same v2 rules, with two differences. The signing algorithm is chosen by
+the governing license's own `Scheme` — never by parsing the file's self-declared `alg` — and
+decryption needs both the license key and the target machine's fingerprint.
+
+`Alg` is a three-part string, `<encoding>+<signing suffix>+v2`: `base64+ed25519+v2`,
+`aes-256-gcm+rsa-pss-sha256+v2`, and so on. The `+v2` marker is mandatory, exactly as it is for
+`.lic`.
 
 ```go
 file, err := tamga.ParseMachineFile(pemText)
@@ -163,14 +261,32 @@ if err != nil {
 // when the license has no scheme set — that is the server's own default.
 // pub must match: ed25519.PublicKey, *rsa.PublicKey, or *ecdsa.PublicKey.
 payload, err := file.Verify(tamga.SchemeEd25519Sign, accountPubKey, licenseKey, fingerprint)
-if err != nil {
+
+var expired *tamga.ExpiredError
+switch {
+case err == nil:
+	// Claims.ExpiresAt is 0 when the checkout was made without a ttl —
+	// that file genuinely never expires.
+	fmt.Println(payload.Data.Attributes.Fingerprint, payload.Claims.ExpiresAt)
+case errors.As(err, &expired):
+	fmt.Printf("file expired at %d — check out a fresh one\n", expired.ExpiresAt)
+case errors.Is(err, tamga.ErrInvalidSignature):
+	fmt.Println("forged or corrupted file")
+default:
 	log.Fatal(err)
 }
-fmt.Println(payload.Data.Attributes.Fingerprint)
 ```
 
-`tamga.ParsePKIXPublicKey(der)` is re-exported for loading an RSA/ECDSA key from an SPKI DER
-blob without importing `crypto/x509` yourself.
+Set `MachineFile.Now` to a server-supplied timestamp for the same reason you would set
+`LicenseFile.Now`.
+
+`tamga.ParsePKIXPublicKey(der)` is re-exported for loading a key from an SPKI DER blob without
+importing `crypto/x509` yourself — but note that **the API does not publish every account key as
+SPKI**, so it is not a general-purpose loader. An ECDSA P-256 key is a raw 65-byte uncompressed
+SEC1 point (`0x04 || X || Y`) that no `crypto/x509` entry point can read; an RSA-2048 key may be
+PKCS#1 `RSAPublicKey` DER (270 bytes) or SPKI (294 bytes) depending on the endpoint that served
+it; an Ed25519 key is the raw 32 bytes. `examples/checkout_machine/main.go::parsePublicKey`
+handles all four cases and is the copy-paste source.
 
 ### Offline proofs
 
@@ -204,6 +320,20 @@ Every claim below is implemented at the cited location.
   `jti`, `kid`). A pre-v2 file is rejected with `ErrMissingClaims`
   (`checkout_license.go::(*LicenseFile).Verify`). **This is a behavioral break:** v1 `.lic`
   files fail verification outright, with no fallback path. Re-issue them via `CheckOutLicense`.
+- **Machine files are format v2 only too, on the same terms.** `alg` must end in `+v2`
+  (`checkout_machine.go::parseMachineFileAlg`) — the check is an equality test on the last
+  `+`-delimited segment, not a substring search, so `+v3` and `+v2junk` are refused as well —
+  and the payload's `meta` claims are surfaced on `MachinePayload.Claims`. The signed `exp` is
+  enforced with the same `clockSkewToleranceSeconds` and the same `*ExpiredError` as the license
+  path, and `MachineFile.Now` accepts a trusted timestamp for the same reason. `exp` is optional
+  server-side — a checkout made without a `ttl` produces a file with no `exp` that genuinely
+  never expires, so its absence is not an error. **This is a behavioral break:** a v1 `.machine`
+  file, and any file that expired while nothing was checking, now fails.
+- **An encrypted machine file's `enc` is `"<nonce_b64>.<ciphertext_b64>"`** — two separately
+  base64-encoded halves, decoded independently (`checkout_machine.go::splitEncryptedEnc`), with
+  the GCM tag already appended to the ciphertext half. It is *not* a single base64 blob of
+  `nonce||ciphertext||tag`; an encrypted `.lic` file is, and the two must not be conflated. The
+  split happens only after the signature over the whole `enc` string has passed.
 - **The signed `exp` is enforced, with a 60-second clock-skew tolerance**
   (`checkout_license.go::clockSkewToleranceSeconds`, applied in `(*LicenseFile).Verify`). The
   tolerance is deliberately small: the local clock is attacker-controlled, so a generous
@@ -239,10 +369,14 @@ Every claim below is implemented at the cited location.
 - **HTTP 429 is handled client-side.** `client.go::(*Client).do` retries a throttled request
   transparently: `parseRetryAfter` reads `Retry-After` as delta-seconds, `retryDelay` caps it at
   60s and otherwise uses jittered exponential backoff, and `isRetryable` scopes auto-retry to
-  `GET` plus the five safe `POST` actions in `client.go::retryablePOSTSuffixes` — `validate`,
-  `validate-key`, `check-in`, `check-out`, `ping`. Creates are deliberately excluded: retrying
-  `POST /machines` can burn a second seat, and only you know whether that is acceptable. The
-  budget is `DefaultMaxRetries` (3); `WithMaxRetries(0)` hands the `*APIError` straight back.
+  `GET` plus the safe `POST` actions in `client.go::retryablePOSTSuffixes` — `validate`,
+  `validate-key`, `check-in`, `check-out`, `ping`, `ping-heartbeat`, `reset-heartbeat`. Creates
+  are deliberately excluded: retrying `POST /machines` can burn a second seat, and only you know
+  whether that is acceptable. The budget is `DefaultMaxRetries` (3); `WithMaxRetries(0)` hands
+  the `*APIError` straight back. The two heartbeat actions need their own entries because
+  `/actions/ping-heartbeat` does not end in `/actions/ping` (that is the *process* ping) — and a
+  throttled heartbeat that is not retried does not surface as an error, it silently drops the
+  machine into `DEAD` (and, under a `require_heartbeat` policy, eventually gets it culled).
 - **Every caller-supplied ID is path-escaped before interpolation**
   (`client.go::escapePathSegment`, `client.go::buildURL`), so an ID containing `/`, `?`, or `#`
   cannot redirect a request or inject query parameters.
@@ -259,25 +393,134 @@ Every claim below is implemented at the cited location.
   `(*MachineFile).Verify` enforces the signature and the scheme, not a lifetime. A machine
   file's practical bound is the `ttl` requested at checkout plus the fact that decryption
   requires the target fingerprint.
-- **`Scope.Entitlements`, `Fingerprint`, `Version`, and `Checksum` are sent but not enforced.**
-  The server parses and ignores them today; only `Product`, `Policy`, `User`, and `Environment`
-  constrain validation. They are modeled for forward-compatibility — see `license.go`'s `Scope`
-  doc comment. Do not build product logic on them yet.
-- **10 of the 24 `ValidationCode` values are unreachable against the current server.** Each
+- **`Scope.Version` and `Scope.Checksum` are never sent.** The server rejects the entire
+  validate call with `422 SCOPE_NOT_SUPPORTED` the moment either appears, before running any
+  validation — so setting them could only break a request that would otherwise have worked.
+  `Scope.MarshalJSON` drops both; the fields remain on the struct for source compatibility and
+  are documented `Deprecated`. `Scope.Entitlements` and `Scope.Fingerprint`, by contrast, are
+  now genuinely enforced: entitlements takes entitlement **codes** (case-insensitive,
+  de-duplicated, satisfied by direct or policy-inherited rows; an empty slice asserts nothing),
+  and fingerprint matches any machine on the license regardless of heartbeat status.
+- **8 of the 24 `ValidationCode` values are unreachable against the current server.** Each
   constant in `validation.go` is marked reachable or not; do not branch on a value that cannot
-  come back today.
-- **The machine heartbeat window is a hardcoded 600s**, not driven by the policy's
-  `heartbeat_duration` field despite that field existing (`machine.go`, `HeartbeatStatus`).
-  `DefaultHeartbeatInterval` is window/3.
-- **`HasEntitlement` fetches at most one page** (100 entitlements, the server's max page size)
-  and caches codes in memory for 60s. For larger entitlement sets, paginate `ListEntitlements`
-  directly.
+  come back today. `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` are reachable now.
+- **`GET /licenses/{id}/entitlements` is not paginable.** The listing unions the license's
+  direct entitlements with the ones inherited from its policy, which a single keyset cursor
+  cannot describe, so the server accepts `page[after]` and ignores it — the same first page
+  comes back forever. `ListEntitlements` never sends `page[after]` and always returns
+  `NextCursor == nil`; a license with more than 100 effective entitlements cannot be enumerated
+  in full. `ListComponents` is unaffected — keyset pagination genuinely works there.
+- **The keyset list routes silently return 25 rows if no `limit` is sent**, with no page
+  metadata to reveal the truncation. `ListComponents`, `ListEntitlements` and
+  `ListMachineProcesses` therefore send an explicit `limit=100` (the server maximum) when
+  `ListOptions.Limit` is unset. `ListMachines` is the exception in the other direction: it is
+  **offset**-paginated and does report `meta.page{number,size,total,totalPages}` (surfaced as
+  `MachinePage.Page`), so nothing is truncated silently there — but it takes `page[number]` and
+  `page[size]` rather than a cursor, and `MachinePage` has no `NextCursor`. The machine
+  collection and its own sub-collections genuinely disagree; do not unify them.
+- **`Entitlement.Attributes.Inherited`** reports whether the license holds an entitlement
+  through its policy. It is only present on the license-scoped list route, hence `*bool` — `nil`
+  means "the server did not say", not `false`. An inherited entitlement cannot be detached, and
+  `GetEntitlement` returns `404` for it, so list-then-get-each is not a valid pattern here.
+- **`QuickValidate` does not always record the validation.** The server skips the
+  `last_validated_at` write whenever the request carries an `Origin` header, and the response is
+  byte-identical either way. This SDK never sets `Origin`, but a proxy or service mesh can — and
+  a license whose `last_validated_at` stays NULL reports `INACTIVE` and keeps firing
+  check-in-overdue webhooks. Use `ValidateByID` when the write must be guaranteed.
+- **Machine `Memory` and `Disk` are MEGABYTES, not bytes** — on both `MachineAttributes` and
+  `CreateMachineOptions`. Reporting 16 GiB as `17179869184` rather than `16384` inflates the
+  license's memory counter by 1048576× and trips `MEMORY_LIMIT_EXCEEDED` on its next activation.
+- **The machine heartbeat window is policy-driven, and `DefaultHeartbeatInterval` still is
+  not.** The server judges a machine against its policy's `heartbeat_duration` when that field
+  is set, and falls back to 600s only when it is null. `DefaultHeartbeatInterval` is window/3
+  computed against that 600s fallback, so on a policy with a shorter `heartbeat_duration` it
+  pings too slowly and machines read `DEAD` between ticks. Read the real window with
+  `HeartbeatIntervalForLicense` (or `GetLicensePolicy` plus
+  `PolicyAttributes.HeartbeatInterval`) and pass the result to `NewHeartbeatScheduler`.
+  Do **not** derive it from `MachineAttributes.NextHeartbeatAt`: that field is computed against
+  the policy on `GetMachine`/`ListMachines`/`CheckOutMachine`/`GenerateOfflineProof` and against
+  the 600s fallback on `CreateMachine`/`PingHeartbeat`/`ResetHeartbeat`/`UpdateMachine`, and a
+  caller holding a `Machine` cannot tell which kind it has. The route a scheduler naturally
+  calls is the wrong one.
+- **Heartbeat intervals are floored at one second.** `NewHeartbeatScheduler`,
+  `NewProcessHeartbeatScheduler` and `PolicyAttributes.HeartbeatInterval` all raise a *positive*
+  interval below 1s up to exactly 1s. Passing `0` still means "use the default" and is
+  unchanged; what changed is that `500 * time.Millisecond` now becomes `1 * time.Second` instead
+  of being passed through. `time.NewTicker` only panics on a non-positive interval, so a
+  sub-second one used to sail through — and `time.NewTicker(time.Millisecond)` ticks a thousand
+  times a second, which through this SDK's own scheduler measures at **999 ping requests per
+  second**. It is easy to land there by accident, because these parameters are `time.Duration`
+  while the policy's `heartbeat_duration` counts whole *seconds*. No policy-expressible window
+  is lost to the floor: `heartbeat_duration` 1 and 2 are still served (their windows divide to
+  333ms and 666ms and are raised to 1s), just with less slack for a dropped ping. A stored
+  `heartbeat_duration` of `0` is a zero-length window no ping rate can hold at all, and keeps
+  falling back to the 600s default rather than pinging every second to fail.
+- **`GET /policies/{id}` is not callable with a license key.** It authorizes on `policy.read`,
+  which is absent from the `LicenseToken` role's permission set, so `GetPolicy` returns `403`
+  unconditionally under `WithLicenseKey` — no policy setting changes that. `GetLicensePolicy`
+  returns the identical `policies` resource through `GET /licenses/{id}/policy`, which
+  authorizes on `license.read`; that is the one an embedded client should call.
+- **`GET /licenses/{id}` is not license-scoped, and returns the key in plaintext.** The server
+  applies `require_license_scope` to exactly five routes — validate, validate-key,
+  quick-validate and both check-outs — and no machine or license read is among them, while a
+  `LicenseToken` holds `machine.read`/`machine.update`/`machine.delete` by default. A license
+  key can therefore read, patch and delete any machine in the account and read any license's
+  `attributes.key`. This is a server-side exposure the SDK cannot fix; it is documented here
+  rather than papered over.
+- **Nothing server-side reaps a process row.** The reaper that would delete a process whose 30s
+  heartbeat window lapsed is dead code, and `ProcessAttributes` carries no heartbeat status that
+  would reveal one had gone stale, so a row created by `CreateProcess` lives until a client
+  deletes it — and every surviving row counts against the policy's `max_processes`. Pair every
+  `CreateProcess` with a `DeleteProcess`; `(*ProcessHeartbeatScheduler).Dispose(ctx)` is that
+  call wired to the process a scheduler was already pinging.
+- **`HeartbeatStatus == DEAD` is route-dependent — and never meant deletion on any of them.**
+  The heartbeat routes cannot report it: `PingHeartbeat` writes `last_heartbeat_at = NOW()` and
+  only then derives the status from it, so it answers `ALIVE` or `RESURRECTED`, and
+  `ResetHeartbeat`/`CreateMachine` answer `NOT_STARTED` — a `case DEAD` branch written against a
+  ping is dead code. Five routes do report it: `GetMachine`, `ListMachines`, `CheckOutMachine`
+  (on `MachinePayload.Data`, after `MachineFile.Verify`), `GenerateOfflineProof` (on the
+  `*Machine` it returns) and `UpdateMachine`. The first four also join the policy, so their
+  `HeartbeatStatus` and `NextHeartbeatAt` are measured against the real `heartbeat_duration`
+  rather than the 600s fallback; `UpdateMachine` is the counterexample that keeps the rule
+  honest — a write that touches none of the heartbeat columns, so it judges an untouched
+  timestamp and can say `DEAD`, while its `UPDATE … RETURNING` omits the policies join and lands
+  on the fallback for both fields. Read the rule as being about which columns a statement
+  touched, not about the HTTP verb. Wherever it
+  appears, `DEAD` reports staleness, not deletion: the server computes it purely from
+  `last_heartbeat_at` versus the window and never consults `require_heartbeat`, and the culling
+  job early-returns unless that column is true — it **defaults to false**, so on a default policy
+  nothing is ever culled and `heartbeat_cull_strategy`/`heartbeat_resurrection_strategy` are both
+  dead letters. The scheduler rule is status-independent: **never stop on any status.**
+  `HeartbeatScheduler.Run` does not, and only context cancellation ends its loop. The only
+  terminal signal is a **404 `NOT_FOUND` from the ping itself**
+  (`errors.Is(err, tamga.ErrNotFound)`) — trigger re-activation from that.
+- **`HasEntitlement` fetches exactly one page** (100 entitlements, the server's max page size)
+  and caches codes in memory for 60s. That page is also the ceiling — the route cannot be
+  paginated, so a `false` result is authoritative only for licenses holding at most 100
+  effective entitlements. Do not gate features on it above that.
 - **Offline-proof datasets should stick to integers, strings, and typical floats.**
   `serdeCompatMarshal` closes the escaping gaps between Go and the server's JSON encoder, but
   not float formatting at extreme magnitudes (e.g. `1e20`), where the two can pick different
   decimal-vs-scientific cutoffs — see `proof.go::GenerateOfflineProof`.
-- **No auto-update / release-checking API**, and **no RFC 9421 response-signature verification**
-  — neither has a working server-side counterpart, so neither is implemented here.
+- **`CheckUpgrade`'s "no update" answer is deliberately ambiguous.** `GET
+  /releases/actions/upgrade` takes four **required** query parameters — `product` (a UUID, not a
+  code), `platform`, `filetype` (one word, not a filename) and `version` — plus optional
+  `channel` and `constraint`; omitting `channel` matches every channel including alpha and dev,
+  and omitting `constraint` means patch-only. A `204` means either "no newer release matches"
+  **or** "a newer release exists and this license is not entitled to move to it", and the server
+  refuses to distinguish them so that a refusal cannot leak a release's existence. `CheckUpgrade`
+  therefore returns `(release, offered, error)`; report `offered == false` as "no update is
+  available to you", never as "you are on the latest version". A suspended license is the one
+  explicit refusal — `403`, checked before the `204` branch is reached.
+- **Artifact download is still not wrapped.** The route exists, but no role currently holds the
+  `artifact.download` permission, so it returns 403 for every real client until that is fixed
+  server-side.
+- **A machine's `group` and `owner` sub-resources are not wrapped either.**
+  `GET|PATCH /machines/{id}/{group,owner}` return `groups` and `users` resource types this SDK
+  does not model, and reassigning a machine's owner or group is an admin-console concern rather
+  than an embedded-client one. A deliberate scope decision, not an oversight.
+- **No RFC 9421 response-signature verification** — no API response is ever signed today, so
+  there is nothing to verify.
 
 ## Documentation
 
