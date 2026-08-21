@@ -12,9 +12,10 @@ is transcribed from it, not paraphrased. Where it disagrees with anything else, 
 actual runtime behavior and wins.
 
 **Current state: feature-complete and released (latest: `v1.2.0`).** Client/transport, license
-validate/check-in, machine/component/process management + heartbeats, entitlements, error model,
-policy enums, license/machine checkout crypto, offline proof, HTTP 429 retry/backoff,
-docs/examples, and CI/release automation are all implemented and tested.
+validate/check-in, machine/component/process management + heartbeats, machine and policy reads,
+the auto-update check, the health probe, entitlements, error model, policy enums,
+license/machine checkout crypto, offline proof, HTTP 429 retry/backoff, docs/examples, and
+CI/release automation are all implemented and tested.
 
 Resource/relationship IDs are plain Go `string`s throughout, not a dedicated UUID type — see
 `license.go`'s `License` doc comment for why (this repo's single-external-dependency constraint
@@ -31,9 +32,14 @@ tamga-go/
 ├── transport.go                # AuthTransport + 5 concrete transports
 ├── license.go                  # License resource, Validate*/CheckIn, Scope
 ├── machine.go                  # Machine/Component/Process CRUD + heartbeats
+├── machine_read.go             # Machine get/list/update, fingerprint lookup, re-activation
+├── process_read.go             # Machine process listing, process delete, scheduler disposal
 ├── validation.go               # ValidationCode string enum (24 values)
 ├── entitlement.go              # Entitlement resource, HasEntitlement + cache
 ├── policy.go                   # LicenseScheme/OverageStrategy/heartbeat enums
+├── policy_read.go              # Policy/license reads + policy-derived heartbeat window
+├── release.go                  # Release resource + auto-update check
+├── health.go                   # Unauthenticated /v1/health probe
 ├── checkout_license.go         # .lic parse/verify — Ed25519 + HKDF AES key, format v2
 ├── checkout_machine.go         # .machine parse/verify — multi-scheme + HKDF, format v2
 ├── proof.go                    # offline proof generate/verify — byte-exact RSA
@@ -83,16 +89,39 @@ Pulled from the Tamga API protocol specification's "Known Server-Side Gaps" sect
 items that actually constrain this repo's scope are listed; several gaps there are
 server-internal (analytics storage, edition gating) and don't apply to any SDK.
 
-- **The auto-update/release-checking endpoint works.** `GET /releases/actions/upgrade` routes to
-  a live handler; the earlier "joins a table that doesn't exist and 500s" claim in this file was
-  false and was blocking work that is in fact buildable. Real constraints if it gets implemented:
-  the endpoint is public (optional auth); an already-current caller gets `204` with an empty
-  body, so a decoder that assumes JSON breaks; omitting `constraint` defaults to patch-only
-  (`~x.y.z`); omitting `channel` matches **every** channel including alpha/dev; `product` is the
-  product **UUID**, not its code; and a malformed query yields a plain-text `400`, not JSON:API.
-  The artifact download route exists too, but is currently blocked by a server-side permission
-  gap (no role holds `artifact.download`) — don't ship a download method until that is fixed
-  upstream.
+- **The auto-update/release-checking endpoint works and is now wrapped** (`release.go`,
+  `CheckUpgrade`). Four **required** query params: `product` (the product UUID, not its code),
+  `platform`, `filetype` (one word, not a filename), `version`; optional `channel` (omitting it
+  matches **every** channel including alpha/dev) and `constraint` (omitting it means
+  patch-only). The `204` carries **two** meanings the server deliberately refuses to
+  distinguish — "no newer release" and "a newer release exists but this licence is not entitled
+  to it" — so `CheckUpgrade` returns `(release, offered, error)` and its doc comment forbids
+  reporting `offered == false` as "up to date". A suspended licence 403s before the 204 branch;
+  an unknown product 404s; a malformed query yields a plain-text `400`, not JSON:API, which is
+  why `UpgradeOptions.validate` refuses an incomplete query locally. `ReleaseAttributes` is
+  camelCase (`productId`) **except** `created`/`updated`, which carry per-field renames that
+  override the struct rule — derive any fixture from `releases/serializer.rs`, never from the Go
+  struct tags. The artifact download route exists too, but is still blocked by a server-side
+  permission gap (no role holds `artifact.download`) — don't ship a download method until that
+  is fixed upstream.
+- **`GET /v1/health` must be sent with NO credential** (`health.go`, `Health`).
+  `require_authentication` resolves the request's bearer *before* it consults the public-route
+  list and propagates a resolution error either way, so a suspended/expired/policy-refused
+  licence key 401s the one call whose purpose is to rule the credential out. Singleplayer — the
+  server's **default** mode — takes the account id from config, so the lookup really runs there;
+  multiplayer short-circuits harmlessly. It is also the only path built without the
+  `/v1/accounts/{account_id}` prefix, and its body is flat, not JSON:API. Diagnostic value: if
+  every call 403s with "The Host header does not match any configured host" while `Health`
+  succeeds, the fault is the server's `TAMGA_ALLOWED_HOSTS`, not the caller's token.
+- **`GET /policies/{id}` 403s under licence-key auth.** `policy.read` is not in the
+  `LicenseToken` role's default permission set (`authz/mod.rs`). `GetLicensePolicy`
+  (`GET /licenses/{id}/policy`, gated on `license.read`) returns the identical `policies`
+  resource and is the one an embedded client must call. Both are exposed and each doc comment
+  points at the other; don't "simplify" by deleting either.
+- **Nothing server-side reaps a process row.** The reaper is dead code and `ProcessAttributes`
+  has no heartbeat status, so a `CreateProcess` row lives until a client deletes it and keeps
+  counting against `policy.max_processes`. `DeleteProcess` and
+  `(*ProcessHeartbeatScheduler).Dispose` are the only cleanup — pair every create with one.
 - **429 handling already ships — extend it, don't re-invent it.** `client.go`'s `do()` retries a
   throttled request transparently: `parseRetryAfter` reads `Retry-After` as delta-seconds,
   `retryDelay` caps it at 60s and otherwise falls back to jittered exponential backoff, and
@@ -118,11 +147,15 @@ server-internal (analytics storage, edition gating) and don't apply to any SDK.
   `case DEAD` branch hung off a heartbeat tick (dead code), and `machine_test.go`'s three
   consecutive `DEAD` responses are a **fixture** proving the loop tolerates an unexpected status
   — not a claim the server produces them on that route. But `DEAD` **does** reach callers here,
-  through the two routes that resolve the machine via the server's `find_by_id` (a read, not a
-  write): `CheckOutMachine` → `MachineFile.Verify` → `MachinePayload.Data`, and
-  `GenerateOfflineProof`'s returned `*Machine`. Those two also join `policies`, so their
+  through five routes: `GetMachine`, `ListMachines`, `CheckOutMachine` → `MachineFile.Verify` →
+  `MachinePayload.Data`, `GenerateOfflineProof`'s returned `*Machine`, and `UpdateMachine`. The
+  first four resolve the machine by *reading* a row and join `policies`, so their
   `heartbeat_status`/`next_heartbeat_at` use the policy's real window instead of the 600s
-  fallback. This is **not** the "modeled but unreachable" class the ⛔ `ValidationCode` values
+  fallback. `UpdateMachine` (`PATCH`) is the counterexample that stops this being restated as a
+  write-vs-read rule: it is a write, but it touches none of the heartbeat columns, so it judges
+  an untouched timestamp and **can** say `DEAD` — and its `UPDATE … RETURNING` omits the
+  `policies` join, so it lands on the fallback for both fields. The durable form of the rule is
+  *whether the response was built off a `last_heartbeat_at` this same request just wrote*. This is **not** the "modeled but unreachable" class the ⛔ `ValidationCode` values
   below belong to — the `HEARTBEAT_DEAD` *validation code* is unreachable, the `DEAD` *heartbeat
   status* is not. Do **not** delete `HeartbeatDead` or `MachineAttributes.HeartbeatStatus`; both
   are live today on those two routes.
@@ -134,6 +167,18 @@ server-internal (analytics storage, edition gating) and don't apply to any SDK.
   `heartbeat_cull_strategy`/`heartbeat_resurrection_strategy` never take effect at all. A ping
   against a `DEAD` machine succeeds and revives it (bare `last_heartbeat_at = NOW()`, no
   resurrection check).
+- **The heartbeat window is readable now — read it, don't hardcode 600s.**
+  `HeartbeatIntervalForLicense` (or `GetLicensePolicy` + `PolicyAttributes.HeartbeatInterval`)
+  returns the policy's own window / 3, ready for `NewHeartbeatScheduler`.
+  `DefaultHeartbeatInterval` is still the 600s-fallback figure and is still wrong for any policy
+  that sets a shorter `heartbeat_duration`. **Never** derive the interval from
+  `MachineAttributes.NextHeartbeatAt`: `CreateMachine`/`PingHeartbeat`/`ResetHeartbeat`/
+  `UpdateMachine` compute it against the 600s fallback while
+  `GetMachine`/`ListMachines`/`CheckOutMachine`/`GenerateOfflineProof` compute it against the
+  policy, and a caller holding a `Machine` cannot tell which it has — the route a scheduler
+  naturally calls is the wrong one. `PolicyAttributes.EffectiveHeartbeatWindow` falls back for a
+  non-positive `heartbeat_duration` (the column has no `CHECK`) because a zero interval would
+  panic `time.NewTicker`.
 - **Model all 24 `ValidationCode` values, but only 16 are reachable today** (`validation.go`
   already encodes this — see its doc comment for the exact split). Do not write example code or
   documentation implying `BANNED`, `HEARTBEAT_DEAD`, or the other ⛔ values can come back from a
@@ -167,6 +212,22 @@ server-internal (analytics storage, edition gating) and don't apply to any SDK.
   entitlements cannot be enumerated in full, so `HasEntitlement`'s `false` is only authoritative
   below that ceiling. `/machines/{id}/components` is different — keyset pagination genuinely
   works there, don't "fix" it to match.
+- **`GET /machines` is OFFSET-paginated; its own sub-collections are keyset.** It returns
+  `meta.page{number,size,total,totalPages}` (`MachinePage.Page`) and takes
+  `page[number]`/`page[size]`; `/machines/{id}/components` and `/machines/{id}/processes` take a
+  bare `limit` + `page[after]` and return no `meta` at all. That disagreement is real server
+  behaviour — do not unify the two shapes in either direction.
+- **`GET /machines` has NO fingerprint filter.** `ListMachinesFilters` accepts
+  `filter[license|owner|group|platform]` and nothing else; `filter[q]` is a case-insensitive
+  `%term%` ILIKE across name/hostname/fingerprint, trimmed and truncated to 200 chars.
+  `FindMachineByFingerprint` therefore narrows with `filter[q]` and then compares for exact
+  equality client-side — containment is a strict superset of equality, so the pair can miss a
+  machine but can never return the wrong one. **Keep that search scoped to the caller's own
+  licence.** All three uniqueness strategies include the caller's own rows, so a genuine
+  re-activation is found licence-scoped under all three; widening to the account adds only the
+  cross-licence seat-sharing case the wider strategies exist to refuse, and a machine resource
+  carries no `license_id`, so a caller could never detect it had adopted another licence's seat.
+  `ActivateMachineIdempotent` re-raises the 409 for that case instead of resolving it.
 - **Both list routes default to 25 rows when no `limit` is sent**, with no page metadata and no
   links to reveal the truncation. `ListComponents`/`ListEntitlements` send an explicit
   `limit=100` (`serverMaxPageLimit`) when `ListOptions.Limit` is unset.
