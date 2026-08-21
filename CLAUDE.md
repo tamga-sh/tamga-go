@@ -105,19 +105,29 @@ server-internal (analytics storage, edition gating) and don't apply to any SDK.
   ping), the rate limiter buckets per route pattern so a whole fleet shares one bucket here, and
   a silently-dropped heartbeat drops the machine into `DEAD` rather than surfacing as a visible
   error (and gets it culled outright under a `require_heartbeat` policy).
-- **`HeartbeatStatus == DEAD` does NOT mean the machine was culled — never write it that way.**
-  `Machine::heartbeat_status*` computes the status from `last_heartbeat_at` versus the window and
-  never reads `require_heartbeat`, so a stale machine reports `DEAD` *forever* with its row and
-  its seat intact. The culling job early-returns unless the policy sets `require_heartbeat`, and
-  that column **defaults to `FALSE`** — so on a default policy nothing is ever culled and
+- **A heartbeat loop must never stop on a `HeartbeatStatus` — state the rule that way, not as a
+  rule about `DEAD`.** The only terminal signal is a **404 `NOT_FOUND` from the ping**
+  (`ErrNotFound`); hang re-activation off that. A `Run` loop that returns or short-circuits on
+  any status is a bug, not a safety feature. Do not reintroduce "re-activate rather than retry
+  ping" guidance anywhere in this repo.
+- **`DEAD` is NOT reachable from any call this SDK makes — never write docs or samples implying
+  a ping can return it.** `ping-heartbeat` writes `last_heartbeat_at = NOW()` and *then* derives
+  the status from that same timestamp, so its response is always `ALIVE`/`RESURRECTED`;
+  `reset-heartbeat` nulls the column and `POST /machines` never sets it, so both answer
+  `NOT_STARTED`. It is the same "modeled but unreachable" class as the ⛔ `ValidationCode` values
+  below. So: no `case DEAD` branch in any example (dead code), and `machine_test.go`'s three
+  consecutive `DEAD` responses are a **fixture** proving the loop tolerates an unexpected status
+  — not a claim the server produces them. Do **not** delete `HeartbeatDead` or
+  `MachineAttributes.HeartbeatStatus`; both go live the moment a machine-read method
+  (`GET /machines/{id}`, machine list) lands, which is where `DEAD` actually surfaces.
+- **When `DEAD` does become readable it reports staleness, never culling.**
+  `Machine::heartbeat_status*` computes it from `last_heartbeat_at` versus the window and never
+  reads `require_heartbeat`, so a stale machine reports `DEAD` *forever* with its row and its
+  seat intact. The culling job early-returns unless the policy sets `require_heartbeat`, and that
+  column **defaults to `FALSE`** — so on a default policy nothing is ever culled and
   `heartbeat_cull_strategy`/`heartbeat_resurrection_strategy` never take effect at all. A ping
   against a `DEAD` machine succeeds and revives it (bare `last_heartbeat_at = NOW()`, no
-  resurrection check), so **a scheduler must keep pinging through `DEAD`** — a `Run` loop that
-  returns or short-circuits on a `DEAD` observation is a bug, not a safety feature, and
-  `machine_test.go` pins the loop across three consecutive `DEAD` responses with a regression
-  test. The only real row-is-gone signal is a **404 `NOT_FOUND` from the ping** (`ErrNotFound`);
-  hang re-activation off that. Do not reintroduce "re-activate rather than retry ping" guidance
-  anywhere in this repo.
+  resurrection check).
 - **Model all 24 `ValidationCode` values, but only 16 are reachable today** (`validation.go`
   already encodes this — see its doc comment for the exact split). Do not write example code or
   documentation implying `BANNED`, `HEARTBEAT_DEAD`, or the other ⛔ values can come back from a

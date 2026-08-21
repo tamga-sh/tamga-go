@@ -73,27 +73,35 @@ type MachineAttributes struct {
 // PolicyAttributes.HeartbeatDuration but exposes no call that returns a
 // Policy.
 //
-// ⚠️ DEAD means ONLY "the last ping is older than the heartbeat window."
-// It does NOT mean the machine row was culled, deleted, or deactivated,
-// and it does not mean the seat was released. The server computes the
-// status purely from last_heartbeat_at versus the window and never
-// consults the policy's require_heartbeat flag, so a machine reports DEAD
-// *forever* while its row — and its seat — are still there. Culling is a
-// separate background job that early-returns for any policy with
-// require_heartbeat = false, and that column defaults to FALSE: on a
-// default policy nothing is ever culled, whatever HeartbeatCullStrategy
-// says.
+// The rule for a heartbeat loop is positive and status-independent: do
+// not stop on ANY status. The only terminal signal from a ping is a 404
+// NOT_FOUND — errors.Is(err, ErrNotFound), meaning the row is gone. Hang
+// re-activation off that, and off nothing else.
 //
-// DEAD is therefore neither terminal nor a reason to stop pinging.
-// Client.PingHeartbeat against a DEAD machine succeeds and revives it —
-// the server's update is a bare last_heartbeat_at = NOW() with no
-// resurrection check gating it. Keep a HeartbeatScheduler running
-// straight through a DEAD observation; stopping is what actually strands
-// the machine.
+// ⚠️ DEAD in particular is not reachable from any call this SDK makes
+// today. Client.PingHeartbeat writes last_heartbeat_at = NOW() and then
+// derives the status from that same timestamp, so its response is always
+// ALIVE or RESURRECTED; Client.ResetHeartbeat nulls the column and
+// Client.CreateMachine never sets it, so both answer NOT_STARTED. DEAD is
+// a real server state — it is simply only visible from a machine *read*
+// (GET /machines/{id} or the machine list), which this SDK does not
+// expose yet. HeartbeatDead and MachineAttributes.HeartbeatStatus stay
+// modeled because both go live the moment a machine-read method lands.
+// Until then, a `case DEAD` branch in caller code is dead code.
 //
-// The only authoritative "this row is gone" signal is a 404 NOT_FOUND
-// from the ping itself — errors.Is(err, ErrNotFound). Hang re-activation
-// off that, never off a DEAD status.
+// When DEAD does become readable it will mean ONLY "the last ping is
+// older than the heartbeat window." It will NOT mean the machine row was
+// culled, deleted, or deactivated, and it will not mean the seat was
+// released. The server computes the status purely from last_heartbeat_at
+// versus the window and never consults the policy's require_heartbeat
+// flag, so a machine reports DEAD *forever* while its row — and its seat
+// — are still there. Culling is a separate background job that
+// early-returns for any policy with require_heartbeat = false, and that
+// column defaults to FALSE: on a default policy nothing is ever culled,
+// whatever HeartbeatCullStrategy says. So even a readable DEAD is not a
+// reason to stop pinging: Client.PingHeartbeat revives the machine
+// whatever state it was in, its update being a bare
+// last_heartbeat_at = NOW() with no resurrection check gating it.
 type HeartbeatStatus string
 
 // Heartbeat status constants — see HeartbeatStatus's doc comment for the
@@ -319,14 +327,18 @@ func (c *Client) ActivateMachine(ctx context.Context, opts CreateMachineOptions,
 // It works — and revives the machine — whatever the machine's current
 // HeartbeatStatus is. A DEAD machine is still pingable: the server's
 // write is a bare last_heartbeat_at = NOW() with no resurrection check in
-// front of it, so the status computed from that column reports the
-// machine alive again on the very next read. Never skip a scheduled ping
-// because the previous one came back DEAD.
+// front of it.
+//
+// ⚠️ That write lands before the response is serialized, and the server
+// derives the returned status from the very timestamp it just wrote — so
+// the Machine returned here always reports ALIVE or RESURRECTED, never
+// DEAD. Never gate a scheduled ping on the previous response's status;
+// there is no status this route can return that means "stop". See
+// HeartbeatStatus.
 //
 // A 404 NOT_FOUND (errors.Is(err, ErrNotFound)) is the one response that
 // does mean the row is gone — the only reliable culled/deleted signal
-// this API exposes. Re-activate on that, not on DEAD. See
-// HeartbeatStatus for why the two are not interchangeable.
+// this API exposes, and the only terminal one. Re-activate on that.
 func (c *Client) PingHeartbeat(ctx context.Context, machineID string) (*Machine, error) {
 	machine, err := decodeJSONAPI[Machine](ctx, c, "POST", fmt.Sprintf("/machines/%s/actions/ping-heartbeat", escapePathSegment(machineID)), nil)
 	if err != nil {
@@ -368,18 +380,18 @@ func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine
 // the machine reads DEAD between ticks, so pass an explicit interval
 // instead — see HeartbeatStatus's doc comment.
 //
-// A DEAD status observed from a ping's response is NOT a stop condition,
-// and Run deliberately keeps pinging through it. DEAD only reports that
-// the *previous* ping fell outside the window: the row and its seat are
-// still there (under the default policy, require_heartbeat = false, they
-// stay there indefinitely), and the very ping that reported DEAD has
-// already revived the machine. Cancelling the scheduler on DEAD is the
-// bug, not the fix.
+// No HeartbeatStatus is a stop condition, and Run deliberately keeps
+// pinging whatever comes back. It never inspects the status, and a caller
+// must not cancel on one either. (A ping's response is in fact always
+// ALIVE or RESURRECTED — the server's write lands before the status is
+// computed, so DEAD is not reachable from this route at all; see
+// HeartbeatStatus. The rule holds regardless, which is the point of
+// stating it status-independently.)
 //
 // Re-activate on a 404 NOT_FOUND from the ping instead — that is the only
-// signal the row is genuinely gone. Observe it with WithHeartbeatOnTick
-// and errors.Is(err, ErrNotFound). See HeartbeatStatus's doc comment for
-// the full server-side story.
+// terminal signal, and the only evidence the row is genuinely gone.
+// Observe it with WithHeartbeatOnTick and errors.Is(err, ErrNotFound).
+// See HeartbeatStatus's doc comment for the full server-side story.
 type HeartbeatScheduler struct {
 	client    *Client
 	onTick    func(*Machine, error)
@@ -405,11 +417,13 @@ type HeartbeatSchedulerOption func(*HeartbeatScheduler)
 // caller has no way to observe the per-tick result short of polling the
 // machine separately.
 //
-// A DEAD HeartbeatStatus on the returned Machine is worth logging, but it
-// is not a reason to cancel the scheduler and not evidence that the
-// machine was culled — the ping that reported it has already revived the
-// row. Only the 404 means the row is gone. See HeartbeatScheduler's and
-// HeartbeatStatus's doc comments.
+// The HeartbeatStatus on the returned Machine is worth logging, but no
+// value of it is a reason to cancel the scheduler, and none is evidence
+// the machine was culled. A ping's response is always ALIVE or
+// RESURRECTED — DEAD is not reachable from this route, so a branch
+// testing for it here is dead code (see HeartbeatStatus). Only the 404
+// means the row is gone. See HeartbeatScheduler's and HeartbeatStatus's
+// doc comments.
 func WithHeartbeatOnTick(fn func(*Machine, error)) HeartbeatSchedulerOption {
 	return func(s *HeartbeatScheduler) { s.onTick = fn }
 }
@@ -434,12 +448,13 @@ func NewHeartbeatScheduler(c *Client, machineID string, interval time.Duration, 
 //
 //	go scheduler.Run(ctx)
 //
-// Only ctx ends the loop. A ping that fails, or one that comes back with
-// HeartbeatDead, is reported to WithHeartbeatOnTick and then the loop
-// ticks again — by design, since a DEAD machine is still pingable and the
-// next ping revives it. A caller that wants to react to a genuinely
-// deleted row (404 NOT_FOUND) does so from the callback and cancels ctx
-// itself; see HeartbeatScheduler's doc comment.
+// Only ctx ends the loop. Every outcome — a failed ping, or a successful
+// one carrying any HeartbeatStatus at all — is reported to
+// WithHeartbeatOnTick and then the loop ticks again. Run never inspects
+// the status, by design: the next ping revives the machine whatever state
+// it was in, so no status is a stop condition. A caller that wants to
+// react to a genuinely deleted row (404 NOT_FOUND) does so from the
+// callback and cancels ctx itself; see HeartbeatScheduler's doc comment.
 func (s *HeartbeatScheduler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()

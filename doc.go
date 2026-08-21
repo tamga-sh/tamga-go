@@ -86,23 +86,29 @@
 // This SDK exposes no call that returns a Policy, so such callers must
 // learn their own window out of band.
 //
-// The single most important thing to get right: a HeartbeatStatus of DEAD
-// means only that the last ping is older than the window. It does not
-// mean the machine row was culled, deleted, or deactivated. The server
-// derives the status from last_heartbeat_at alone and never consults the
-// policy's require_heartbeat flag, and the culling job that would delete
-// the row early-returns unless require_heartbeat is set — which it is
-// not, by default. A machine can therefore report DEAD indefinitely while
-// its row and its seat are still there.
+// The single most important thing to get right: the loop must not stop
+// on ANY HeartbeatStatus, and the only terminal signal from a ping is a
+// 404 NOT_FOUND (errors.Is(err, ErrNotFound)), meaning the row is gone.
+// Hang re-activation off that and nothing else; observe it per tick with
+// WithHeartbeatOnTick. HeartbeatScheduler.Run never inspects the status,
+// and only context cancellation ends its loop.
 //
-// So a scheduler must keep pinging through DEAD. Client.PingHeartbeat
-// against a DEAD machine succeeds and revives it (the server writes
-// last_heartbeat_at = NOW() with no resurrection check), and
-// HeartbeatScheduler.Run is written to do exactly that — only context
-// cancellation ends its loop. Treat a 404 NOT_FOUND from the ping
-// (errors.Is(err, ErrNotFound)) as the row-is-gone signal and hang
-// re-activation off that instead; observe it per tick with
-// WithHeartbeatOnTick.
+// DEAD in particular is not reachable from any call this SDK makes.
+// Client.PingHeartbeat writes last_heartbeat_at = NOW() and then derives
+// the status from that same timestamp, so its response is always ALIVE or
+// RESURRECTED; Client.ResetHeartbeat and Client.CreateMachine both answer
+// NOT_STARTED. DEAD is a real server state, visible only from a machine
+// read this SDK does not expose yet — HeartbeatDead stays modeled for
+// when that lands, but a `case DEAD` branch written against a ping today
+// is dead code.
+//
+// And even when readable, DEAD would mean only that the last ping is
+// older than the window — never that the row was culled, deleted, or
+// deactivated. The server derives the status from last_heartbeat_at alone
+// and never consults the policy's require_heartbeat flag, and the culling
+// job that would delete the row early-returns unless require_heartbeat is
+// set — which it is not, by default. A machine can therefore report DEAD
+// indefinitely while its row and its seat are still there.
 //
 // # Request deadlines
 //

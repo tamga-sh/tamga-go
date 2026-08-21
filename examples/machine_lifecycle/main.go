@@ -86,15 +86,17 @@ func main() {
 		hbCtx, cancel := context.WithTimeout(ctx, 3*tamga.DefaultHeartbeatInterval)
 		defer cancel()
 
-		// A DEAD heartbeat_status is NOT a stop condition. It reports only
-		// that the previous ping fell outside the heartbeat window —
-		// the machine row and its seat are still there (under the default
-		// policy, require_heartbeat = false, they stay there for good), and
-		// the very ping that reported DEAD has already revived it. So this
-		// callback logs DEAD and lets the loop keep ticking.
+		// No heartbeat_status is a stop condition, so this callback logs
+		// whatever comes back and lets the loop keep ticking. The one
+		// signal that ends it is a 404 from the ping — the row is genuinely
+		// gone. That, and only that, is where re-activation belongs.
 		//
-		// The signal that the row is genuinely gone is a 404 from the ping.
-		// That, and only that, is where re-activation belongs.
+		// There is deliberately no `case ... == tamga.HeartbeatDead` here.
+		// A ping writes last_heartbeat_at = NOW() and then derives the
+		// status from that same timestamp, so its response is always ALIVE
+		// or RESURRECTED; such a branch would be dead code. DEAD is a real
+		// server state, but it is only visible from a machine read this SDK
+		// does not expose yet.
 		onTick := func(m *tamga.Machine, tickErr error) {
 			switch {
 			case errors.Is(tickErr, tamga.ErrNotFound):
@@ -102,8 +104,6 @@ func main() {
 				cancel()
 			case tickErr != nil:
 				fmt.Printf("heartbeat: ping failed (will retry on the next tick): %v\n", tickErr)
-			case m.Attributes.HeartbeatStatus == tamga.HeartbeatDead:
-				fmt.Println("heartbeat: status DEAD — stale only, this ping revived it; still pinging")
 			default:
 				fmt.Printf("heartbeat: status %s\n", m.Attributes.HeartbeatStatus)
 			}

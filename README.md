@@ -72,15 +72,20 @@ fmt.Println(machine.ID, machine.Attributes.HeartbeatStatus)
 Keep it alive with `NewHeartbeatScheduler(client, machine.ID, tamga.DefaultHeartbeatInterval)`
 and `(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled.
 
-> **`HeartbeatStatus == DEAD` does not mean the machine was culled.** It means only that the
-> last ping is older than the heartbeat window. The server derives the status from
-> `last_heartbeat_at` alone and never looks at the policy's `require_heartbeat` flag, and the
-> culling job that would delete the row early-returns unless `require_heartbeat` is set — which
-> it is **not**, by default. A machine can report `DEAD` forever while its row and its seat are
-> still there. So **keep pinging through `DEAD`**: `PingHeartbeat` against a dead machine
-> succeeds and revives it, and `Run` is written to keep ticking rather than stop. The row-is-gone
-> signal is a **404 from the ping** — hang re-activation off `errors.Is(err, tamga.ErrNotFound)`,
-> never off a `DEAD` status:
+> **The loop must not stop on any `HeartbeatStatus`.** The only terminal signal from a ping is a
+> **404 `NOT_FOUND`**, which means the row is gone — hang re-activation off
+> `errors.Is(err, tamga.ErrNotFound)` and off nothing else. `Run` is written that way: it never
+> inspects the status, and only context cancellation ends its loop.
+>
+> **`DEAD` is not reachable from any call this SDK makes today.** `PingHeartbeat` writes
+> `last_heartbeat_at = NOW()` and then derives the status from that same timestamp, so its
+> response is always `ALIVE` or `RESURRECTED`; `ResetHeartbeat` and `CreateMachine` both answer
+> `NOT_STARTED`. `DEAD` is a real server state, visible only from a machine read this SDK does
+> not expose yet — so a `case DEAD` branch written against a ping is dead code. And even when
+> readable it would mean only that the last ping is older than the window, **not** that the
+> machine was culled: the server never looks at the policy's `require_heartbeat` flag when
+> computing it, and the culling job early-returns unless that flag is set — which it is **not**,
+> by default. A machine can report `DEAD` forever with its row and its seat intact.
 >
 > ```go
 > hbCtx, cancel := context.WithCancel(ctx)
@@ -93,8 +98,8 @@ and `(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled.
 > 			cancel()
 > 			return
 > 		}
-> 		// A DEAD status here is staleness only: this very ping revived
-> 		// the machine. Log it if you like, but do not stop the loop.
+> 		// Log m.Attributes.HeartbeatStatus if you like, but never branch
+> 		// the loop on it — no status is a stop condition.
 > 	}))
 > go scheduler.Run(hbCtx)
 > ```
@@ -343,17 +348,21 @@ Every claim below is implemented at the cited location.
   explicit interval to `NewHeartbeatScheduler` — and today they must learn their own window out
   of band, because this SDK models the field as `PolicyAttributes.HeartbeatDuration` but exposes
   no call that returns a `Policy` (`machine.go`, `HeartbeatStatus`).
-- **`HeartbeatStatus == DEAD` reports staleness, not deletion.** The server computes it purely
-  from `last_heartbeat_at` versus the window and never consults the policy's `require_heartbeat`
-  flag, so a machine reports `DEAD` indefinitely with its row and seat intact. Culling is a
-  separate background job that early-returns unless `require_heartbeat` is true, and that column
-  **defaults to false** — meaning on a default policy nothing is ever culled and
-  `heartbeat_cull_strategy`/`heartbeat_resurrection_strategy` are both dead letters. A ping
-  against a `DEAD` machine succeeds and revives it (a bare `last_heartbeat_at = NOW()` with no
-  resurrection check), so a scheduler must keep pinging through `DEAD`; `HeartbeatScheduler.Run`
-  does, and only context cancellation ends its loop. The only reliable row-is-gone signal is a
-  **404 `NOT_FOUND` from the ping itself** (`errors.Is(err, tamga.ErrNotFound)`) — trigger
-  re-activation from that.
+- **`HeartbeatStatus == DEAD` is unreachable through this SDK — and never meant deletion
+  anyway.** Every route here returns a machine that cannot be `DEAD`: `PingHeartbeat` writes
+  `last_heartbeat_at = NOW()` and only then derives the status from it, so it answers `ALIVE` or
+  `RESURRECTED`, and `ResetHeartbeat`/`CreateMachine` answer `NOT_STARTED`. `DEAD` is a real
+  server state, visible only from a machine read this SDK does not expose yet — `HeartbeatDead`
+  and `MachineAttributes.HeartbeatStatus` stay modeled because both go live when that method
+  lands, but a `case DEAD` branch written against a ping today is dead code. When it becomes
+  readable it reports staleness, not deletion: the server computes it purely from
+  `last_heartbeat_at` versus the window and never consults `require_heartbeat`, and the culling
+  job early-returns unless that column is true — it **defaults to false**, so on a default policy
+  nothing is ever culled and `heartbeat_cull_strategy`/`heartbeat_resurrection_strategy` are both
+  dead letters. The scheduler rule is status-independent: **never stop on any status.**
+  `HeartbeatScheduler.Run` does not, and only context cancellation ends its loop. The only
+  terminal signal is a **404 `NOT_FOUND` from the ping itself**
+  (`errors.Is(err, tamga.ErrNotFound)`) — trigger re-activation from that.
 - **`HasEntitlement` fetches exactly one page** (100 entitlements, the server's max page size)
   and caches codes in memory for 60s. That page is also the ceiling — the route cannot be
   paginated, so a `false` result is authoritative only for licenses holding at most 100

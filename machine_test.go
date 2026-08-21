@@ -278,20 +278,24 @@ func machineJSONWithHeartbeatStatus(status HeartbeatStatus) string {
 	)
 }
 
-// TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses is
-// the regression test for the "DEAD means the row was culled" mistake.
+// TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses pins
+// the property that Run does not stop on a HeartbeatStatus — on ANY
+// status, not on DEAD specifically. A Run loop that returns, breaks, or
+// otherwise short-circuits on some status it dislikes strands the machine
+// permanently instead of recovering it, since the next ping would have
+// revived it.
 //
-// DEAD reports only that the previous ping fell outside the heartbeat
-// window. The row and its seat are still there — the server's cull job
-// early-returns unless the policy sets require_heartbeat, and that column
-// defaults to false — and the very ping that reported DEAD has already
-// revived the machine, because the server's write is a bare
-// last_heartbeat_at = NOW() with no resurrection check. A Run loop that
-// returns, breaks, or otherwise short-circuits on a DEAD observation
-// therefore strands the machine permanently instead of recovering it.
+// ⚠️ The DEAD responses served below are a fixture, not a claim about the
+// server. A real ping cannot answer DEAD: it writes
+// last_heartbeat_at = NOW() and then derives the status from that same
+// timestamp, so a live response is always ALIVE or RESURRECTED (see
+// HeartbeatStatus). DEAD is used here precisely because it is the status
+// a well-meaning change is most likely to special-case against — and
+// because an unrecognized status must not stop the loop either, the wire
+// type being deliberately forward-compatible.
 //
-// So: three consecutive DEAD responses must be followed by a fourth ping,
-// which observes the revival. Only ctx may end the loop.
+// So: three consecutive DEAD responses must be followed by a fourth ping.
+// Only ctx may end the loop.
 func TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses(t *testing.T) {
 	const deadResponses = 3
 
@@ -342,7 +346,7 @@ func TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses(t *testi
 		mu.Unlock()
 		cancel()
 		<-runErr
-		t.Fatalf("the scheduler served only %d ping(s); Run must keep pinging through %d consecutive DEAD responses, not stop on one", n, deadResponses)
+		t.Fatalf("the scheduler served only %d ping(s); Run must keep pinging through all %d fixture responses, not stop on a status it did not expect", n, deadResponses)
 	}
 
 	// The revival response is written before its onTick callback runs;
@@ -383,7 +387,7 @@ func TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses(t *testi
 		}
 	}
 	if observedSnapshot[deadResponses] != HeartbeatAlive {
-		t.Errorf("observed[%d] = %q, want ALIVE — the ping after three DEADs must revive the machine", deadResponses, observedSnapshot[deadResponses])
+		t.Errorf("observed[%d] = %q, want ALIVE — the fixture switches to ALIVE on the fourth ping, so the loop must have reached it", deadResponses, observedSnapshot[deadResponses])
 	}
 }
 
