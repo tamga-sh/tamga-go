@@ -72,19 +72,38 @@ func (s OverageStrategy) Allows(count, max int64) bool {
 }
 
 // HeartbeatCullStrategy controls what happens to a machine row once its
-// heartbeat window elapses.
+// heartbeat window elapses — but only on a policy that has opted in.
+//
+// ⚠️ The strategy is inert unless PolicyAttributes.RequireHeartbeat is
+// true. The server's culling job early-returns for any policy with
+// require_heartbeat = false, and that column defaults to FALSE, so on a
+// default policy no machine is ever culled under either value. A machine
+// that stops pinging under such a policy reports HeartbeatDead
+// indefinitely while its row and its seat stay exactly where they were.
+// DEAD is a staleness report about last_heartbeat_at, never proof that
+// this strategy ran — see HeartbeatStatus.
 type HeartbeatCullStrategy string
 
 const (
-	// HeartbeatCullDeactivateDead deletes the machine row once dead.
+	// HeartbeatCullDeactivateDead deletes the machine row once dead —
+	// only on a policy that sets RequireHeartbeat.
 	HeartbeatCullDeactivateDead HeartbeatCullStrategy = "DEACTIVATE_DEAD"
-	// HeartbeatCullKeepDead keeps the dead machine row.
+	// HeartbeatCullKeepDead keeps the dead machine row. This is also the
+	// effective behavior of every policy that leaves RequireHeartbeat
+	// false, whatever its configured strategy claims.
 	HeartbeatCullKeepDead HeartbeatCullStrategy = "KEEP_DEAD"
 )
 
 // HeartbeatResurrectionStrategy is the grace window after a machine's
 // heartbeat window elapses during which a new ping revives it instead of
 // HeartbeatCullStrategy taking effect.
+//
+// It bounds only how long the culling job tolerates a stale row, and that
+// job runs at all only under RequireHeartbeat. It does not gate
+// Client.PingHeartbeat: a ping against a DEAD machine writes
+// last_heartbeat_at unconditionally, with no resurrection check, so for
+// as long as the row exists the ping brings the machine back regardless
+// of this setting.
 type HeartbeatResurrectionStrategy string
 
 // Heartbeat resurrection grace-window constants — see
@@ -212,6 +231,13 @@ type Policy struct {
 // would get a false "not equal" without calling EffectiveOverageStrategy/
 // EffectiveResurrectionStrategy first. Keeping these three fields raw-typed
 // documents at the type level that a translation step is required.
+//
+// RequireHeartbeat is the master switch for heartbeat enforcement and it
+// defaults to FALSE. While it is false the server's culling job
+// early-returns and HeartbeatCullStrategy/HeartbeatResurrectionStrategy
+// are both dead letters — no machine on this policy is ever culled, no
+// matter how long it has reported HeartbeatDead. Read it before
+// concluding anything from a machine's heartbeat status.
 type PolicyAttributes struct {
 	CheckInInterval                  *CheckInInterval       `json:"check_in_interval"`
 	MaxUsers                         *int32                 `json:"max_users"`

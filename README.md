@@ -72,6 +72,33 @@ fmt.Println(machine.ID, machine.Attributes.HeartbeatStatus)
 Keep it alive with `NewHeartbeatScheduler(client, machine.ID, tamga.DefaultHeartbeatInterval)`
 and `(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled.
 
+> **`HeartbeatStatus == DEAD` does not mean the machine was culled.** It means only that the
+> last ping is older than the 600s window. The server derives the status from
+> `last_heartbeat_at` alone and never looks at the policy's `require_heartbeat` flag, and the
+> culling job that would delete the row early-returns unless `require_heartbeat` is set — which
+> it is **not**, by default. A machine can report `DEAD` forever while its row and its seat are
+> still there. So **keep pinging through `DEAD`**: `PingHeartbeat` against a dead machine
+> succeeds and revives it, and `Run` is written to keep ticking rather than stop. The row-is-gone
+> signal is a **404 from the ping** — hang re-activation off `errors.Is(err, tamga.ErrNotFound)`,
+> never off a `DEAD` status:
+>
+> ```go
+> hbCtx, cancel := context.WithCancel(ctx)
+> defer cancel()
+> scheduler := tamga.NewHeartbeatScheduler(client, machine.ID, 0,
+> 	tamga.WithHeartbeatOnTick(func(m *tamga.Machine, err error) {
+> 		if errors.Is(err, tamga.ErrNotFound) {
+> 			// The row is genuinely gone — this, and only this, is the
+> 			// re-activation trigger.
+> 			cancel()
+> 			return
+> 		}
+> 		// A DEAD status here is staleness only: this very ping revived
+> 		// the machine. Log it if you like, but do not stop the loop.
+> 	}))
+> go scheduler.Run(hbCtx)
+> ```
+
 `examples/` holds runnable programs for validation, check-in, license/machine file verification,
 the machine lifecycle, and entitlement checks — `go run ./examples/validate -h` to start.
 
@@ -258,8 +285,8 @@ Every claim below is implemented at the cited location.
   whether that is acceptable. The budget is `DefaultMaxRetries` (3); `WithMaxRetries(0)` hands
   the `*APIError` straight back. The two heartbeat actions need their own entries because
   `/actions/ping-heartbeat` does not end in `/actions/ping` (that is the *process* ping) — and a
-  throttled heartbeat that is not retried does not surface as an error, it gets the machine
-  culled.
+  throttled heartbeat that is not retried does not surface as an error, it silently drops the
+  machine into `DEAD` (and, under a `require_heartbeat` policy, eventually gets it culled).
 - **Every caller-supplied ID is path-escaped before interpolation**
   (`client.go::escapePathSegment`, `client.go::buildURL`), so an ID containing `/`, `?`, or `#`
   cannot redirect a request or inject query parameters.
@@ -311,6 +338,17 @@ Every claim below is implemented at the cited location.
 - **The machine heartbeat window is a hardcoded 600s**, not driven by the policy's
   `heartbeat_duration` field despite that field existing (`machine.go`, `HeartbeatStatus`).
   `DefaultHeartbeatInterval` is window/3.
+- **`HeartbeatStatus == DEAD` reports staleness, not deletion.** The server computes it purely
+  from `last_heartbeat_at` versus the window and never consults the policy's `require_heartbeat`
+  flag, so a machine reports `DEAD` indefinitely with its row and seat intact. Culling is a
+  separate background job that early-returns unless `require_heartbeat` is true, and that column
+  **defaults to false** — meaning on a default policy nothing is ever culled and
+  `heartbeat_cull_strategy`/`heartbeat_resurrection_strategy` are both dead letters. A ping
+  against a `DEAD` machine succeeds and revives it (a bare `last_heartbeat_at = NOW()` with no
+  resurrection check), so a scheduler must keep pinging through `DEAD`; `HeartbeatScheduler.Run`
+  does, and only context cancellation ends its loop. The only reliable row-is-gone signal is a
+  **404 `NOT_FOUND` from the ping itself** (`errors.Is(err, tamga.ErrNotFound)`) — trigger
+  re-activation from that.
 - **`HasEntitlement` fetches exactly one page** (100 entitlements, the server's max page size)
   and caches codes in memory for 60s. That page is also the ceiling — the route cannot be
   paginated, so a `false` result is authoritative only for licenses holding at most 100

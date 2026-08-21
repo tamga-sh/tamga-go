@@ -286,7 +286,10 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 // every caller behind an untrusted proxy as the same key, so an entire
 // fleet shares one bucket on this route and throttles itself. A dropped
 // heartbeat is not a retried request the caller can see fail — it is a
-// machine that stops pinging and gets culled. Both this and
+// machine that silently slides into HeartbeatDead, invisible to the
+// caller, and that under a require_heartbeat policy eventually gets
+// culled. (Under the default policy, require_heartbeat = false, the row
+// survives but still reports DEAD indefinitely.) Both this and
 // "/actions/reset-heartbeat" are bare `last_heartbeat_at = NOW()`-class
 // state writes with no counter to double-increment, so repeating them is
 // unconditionally safe.

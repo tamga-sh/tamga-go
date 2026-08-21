@@ -73,6 +73,30 @@
 // with WithMaxRetries (default DefaultMaxRetries); passing 0 surfaces the
 // *APIError immediately.
 //
+// # Machine heartbeats
+//
+// HeartbeatScheduler pings one machine on a timer
+// (DefaultHeartbeatInterval, window/3 of the hardcoded 600s window) until
+// its context is canceled.
+//
+// The single most important thing to get right: a HeartbeatStatus of DEAD
+// means only that the last ping is older than the window. It does not
+// mean the machine row was culled, deleted, or deactivated. The server
+// derives the status from last_heartbeat_at alone and never consults the
+// policy's require_heartbeat flag, and the culling job that would delete
+// the row early-returns unless require_heartbeat is set — which it is
+// not, by default. A machine can therefore report DEAD indefinitely while
+// its row and its seat are still there.
+//
+// So a scheduler must keep pinging through DEAD. Client.PingHeartbeat
+// against a DEAD machine succeeds and revives it (the server writes
+// last_heartbeat_at = NOW() with no resurrection check), and
+// HeartbeatScheduler.Run is written to do exactly that — only context
+// cancellation ends its loop. Treat a 404 NOT_FOUND from the ping
+// (errors.Is(err, ErrNotFound)) as the row-is-gone signal and hang
+// re-activation off that instead; observe it per tick with
+// WithHeartbeatOnTick.
+//
 // # Request deadlines
 //
 // Every request is bounded by DefaultTimeout (45s), deliberately longer

@@ -85,7 +85,31 @@ func main() {
 	if *heartbeat {
 		hbCtx, cancel := context.WithTimeout(ctx, 3*tamga.DefaultHeartbeatInterval)
 		defer cancel()
-		scheduler := tamga.NewHeartbeatScheduler(client, machine.ID, 0 /* use the recommended default interval */)
+
+		// A DEAD heartbeat_status is NOT a stop condition. It reports only
+		// that the previous ping fell outside the hardcoded 600s window —
+		// the machine row and its seat are still there (under the default
+		// policy, require_heartbeat = false, they stay there for good), and
+		// the very ping that reported DEAD has already revived it. So this
+		// callback logs DEAD and lets the loop keep ticking.
+		//
+		// The signal that the row is genuinely gone is a 404 from the ping.
+		// That, and only that, is where re-activation belongs.
+		onTick := func(m *tamga.Machine, tickErr error) {
+			switch {
+			case errors.Is(tickErr, tamga.ErrNotFound):
+				fmt.Println("heartbeat: machine row is gone (404) — re-activate here")
+				cancel()
+			case tickErr != nil:
+				fmt.Printf("heartbeat: ping failed (will retry on the next tick): %v\n", tickErr)
+			case m.Attributes.HeartbeatStatus == tamga.HeartbeatDead:
+				fmt.Println("heartbeat: status DEAD — stale only, this ping revived it; still pinging")
+			default:
+				fmt.Printf("heartbeat: status %s\n", m.Attributes.HeartbeatStatus)
+			}
+		}
+
+		scheduler := tamga.NewHeartbeatScheduler(client, machine.ID, 0 /* use the recommended default interval */, tamga.WithHeartbeatOnTick(onTick))
 		fmt.Println("running heartbeat scheduler for a few ticks (this will take a while at the real ~200s default interval)...")
 		if runErr := scheduler.Run(hbCtx); runErr != nil {
 			fmt.Printf("heartbeat scheduler stopped: %v\n", runErr)

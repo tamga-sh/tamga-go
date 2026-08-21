@@ -266,6 +266,169 @@ func TestHeartbeatScheduler_TicksAndStopsOnCancel(t *testing.T) {
 	}
 }
 
+// machineJSONWithHeartbeatStatus renders representativeMachineJSON with a
+// chosen heartbeat_status, so a fake server can walk a machine through a
+// status sequence across successive pings.
+func machineJSONWithHeartbeatStatus(status HeartbeatStatus) string {
+	return strings.Replace(
+		representativeMachineJSON,
+		`"heartbeat_status":"NOT_STARTED"`,
+		`"heartbeat_status":"`+string(status)+`"`,
+		1,
+	)
+}
+
+// TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses is
+// the regression test for the "DEAD means the row was culled" mistake.
+//
+// DEAD reports only that the previous ping fell outside the heartbeat
+// window. The row and its seat are still there — the server's cull job
+// early-returns unless the policy sets require_heartbeat, and that column
+// defaults to false — and the very ping that reported DEAD has already
+// revived the machine, because the server's write is a bare
+// last_heartbeat_at = NOW() with no resurrection check. A Run loop that
+// returns, breaks, or otherwise short-circuits on a DEAD observation
+// therefore strands the machine permanently instead of recovering it.
+//
+// So: three consecutive DEAD responses must be followed by a fourth ping,
+// which observes the revival. Only ctx may end the loop.
+func TestHeartbeatScheduler_KeepsPingingThroughConsecutiveDeadResponses(t *testing.T) {
+	const deadResponses = 3
+
+	var mu sync.Mutex
+	var served int
+	var observed []HeartbeatStatus
+	var tickErrs []error
+	revived := make(chan struct{})
+
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		served++
+		n := served
+		mu.Unlock()
+
+		status := HeartbeatDead
+		if n > deadResponses {
+			status = HeartbeatAlive
+		}
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":` + machineJSONWithHeartbeatStatus(status) + `}`))
+		if n == deadResponses+1 {
+			close(revived)
+		}
+	})
+	defer closeFn()
+
+	scheduler := NewHeartbeatScheduler(c, "mach-id", 2*time.Millisecond, WithHeartbeatOnTick(func(m *Machine, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			tickErrs = append(tickErrs, err)
+			return
+		}
+		observed = append(observed, m.Attributes.HeartbeatStatus)
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- scheduler.Run(ctx) }()
+
+	select {
+	case <-revived:
+	case <-time.After(5 * time.Second):
+		mu.Lock()
+		n := served
+		mu.Unlock()
+		cancel()
+		<-runErr
+		t.Fatalf("the scheduler served only %d ping(s); Run must keep pinging through %d consecutive DEAD responses, not stop on one", n, deadResponses)
+	}
+
+	// The revival response is written before its onTick callback runs;
+	// wait for the callback so the assertions below see it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		got := len(observed)
+		mu.Unlock()
+		if got > deadResponses || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Snapshot before cancelling: cancel() aborts whatever ping is in
+	// flight, and that abort legitimately reaches the tick callback as a
+	// context.Canceled error.
+	mu.Lock()
+	observedSnapshot := append([]HeartbeatStatus(nil), observed...)
+	errsSnapshot := append([]error(nil), tickErrs...)
+	mu.Unlock()
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Errorf("Run() error = %v, want context.Canceled — only ctx may end the loop", err)
+	}
+
+	if len(errsSnapshot) != 0 {
+		t.Fatalf("unexpected ping errors: %v", errsSnapshot)
+	}
+	if len(observedSnapshot) <= deadResponses {
+		t.Fatalf("observed = %v, want more than %d ticks — the loop stopped on a DEAD response", observedSnapshot, deadResponses)
+	}
+	for i := 0; i < deadResponses; i++ {
+		if observedSnapshot[i] != HeartbeatDead {
+			t.Fatalf("observed[%d] = %q, want DEAD (test setup)", i, observedSnapshot[i])
+		}
+	}
+	if observedSnapshot[deadResponses] != HeartbeatAlive {
+		t.Errorf("observed[%d] = %q, want ALIVE — the ping after three DEADs must revive the machine", deadResponses, observedSnapshot[deadResponses])
+	}
+}
+
+// TestHeartbeatScheduler_TreatsPingNotFoundAsTheRowIsGoneSignal pins the
+// other half of the correction: a 404 from the ping, not a DEAD status,
+// is the signal that the machine row is actually gone. It surfaces to
+// WithHeartbeatOnTick as an error matching ErrNotFound, which is where a
+// caller hangs re-activation. Run itself still does not stop — the caller
+// cancels ctx.
+func TestHeartbeatScheduler_TreatsPingNotFoundAsTheRowIsGoneSignal(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errors":[{"title":"Not found","code":"NOT_FOUND","detail":"machine not found"}]}`))
+	})
+	defer closeFn()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	gone := make(chan struct{})
+	var once sync.Once
+	scheduler := NewHeartbeatScheduler(c, "mach-id", 2*time.Millisecond, WithHeartbeatOnTick(func(_ *Machine, err error) {
+		if errors.Is(err, ErrNotFound) {
+			once.Do(func() { close(gone) })
+		}
+	}))
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- scheduler.Run(ctx) }()
+
+	select {
+	case <-gone:
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-runErr
+		t.Fatal("a 404 from the ping never surfaced as ErrNotFound on the tick callback")
+	}
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Errorf("Run() error = %v, want context.Canceled", err)
+	}
+}
+
 // TestHeartbeatScheduler_WithOnTickIsObservableExternally proves
 // WithHeartbeatOnTick is actually reachable and usable from outside this
 // package — a caller can observe every ping's (*Machine, error) result,

@@ -279,8 +279,9 @@ func TestActivateMachine_OverageStrategyStillRollsBack(t *testing.T) {
 
 // The machine heartbeat lives at /actions/ping-heartbeat, which does not
 // end in /actions/ping, so it needs its own suffix entry. A dropped 429
-// here is not a visible failure — it is a machine that stops pinging and
-// gets culled.
+// here is not a visible failure — it is a machine that silently slides
+// into HeartbeatDead (and, under a require_heartbeat policy, is
+// eventually culled).
 func TestIsRetryable_HeartbeatActionsAreRetryable(t *testing.T) {
 	cases := []struct {
 		path string
