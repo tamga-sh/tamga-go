@@ -209,6 +209,12 @@ type MachinePayload struct {
 // specifically. Reuses the same "sign over the base64 string, not decoded
 // bytes" convention as checkout_license.go — see that file's Verify doc
 // comment for the gotcha this shares.
+//
+// One key only, with the same rotation caveat (*LicenseFile).Verify
+// carries: VerifyWithKeySet (checkout_key_set.go) is the rotation-aware
+// equivalent for Ed25519-signed files. RSA and ECDSA machine files are
+// signed with keys the server never publishes and never rotates, so this
+// method remains the only way to verify one — and the only one needed.
 func (f *MachineFile) Verify(scheme LicenseScheme, pub crypto.PublicKey, licenseKey, fingerprint string) (*MachinePayload, error) {
 	if scheme == SchemeRSA2048JWTRS256 {
 		return nil, ErrSchemeNotSupported
@@ -266,13 +272,31 @@ func (f *MachineFile) Verify(scheme LicenseScheme, pub crypto.PublicKey, license
 	// cryptographic binding; a third encoding without that incompatibility
 	// would need the encrypted/plain bit moved inside the signed meta
 	// claims server-side to stay safe.
-	var plaintext []byte
+	plaintext, err := f.decodePlaintext(encPrefix, licenseKey, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+
+	return f.payloadFrom(plaintext)
+}
+
+// decodePlaintext decodes (and, for the aes-256-gcm prefix, decrypts) enc
+// under the encoding prefix parsed out of the alg string.
+//
+// Extracted so the single-key and key-set entry points cannot drift into
+// decoding the same file two different ways. (*MachineFile).Verify reaches
+// it only after the signature has passed; (*MachineFile).VerifyWithKeySet
+// also calls it on its failure path, to read the kid claim of a file that
+// verified under no key at all — see that method's doc comment for why that
+// is sound.
+func (f *MachineFile) decodePlaintext(encPrefix, licenseKey, fingerprint string) ([]byte, error) {
 	switch encPrefix {
 	case "base64":
-		plaintext, err = base64.StdEncoding.DecodeString(f.Enc)
+		plaintext, err := base64.StdEncoding.DecodeString(f.Enc)
 		if err != nil {
 			return nil, fmt.Errorf("tamga: invalid base64 in machine file enc: %w", err)
 		}
+		return plaintext, nil
 	case "aes-256-gcm":
 		if licenseKey == "" {
 			return nil, ErrLicenseKeyRequired
@@ -288,14 +312,20 @@ func (f *MachineFile) Verify(scheme LicenseScheme, pub crypto.PublicKey, license
 		if keyErr != nil {
 			return nil, keyErr
 		}
-		plaintext, err = internalcrypto.OpenAESGCM(key, nonce, ciphertextAndTag)
-		if err != nil {
-			return nil, err
+		plaintext, openErr := internalcrypto.OpenAESGCM(key, nonce, ciphertextAndTag)
+		if openErr != nil {
+			return nil, openErr
 		}
+		return plaintext, nil
 	default:
 		return nil, fmt.Errorf("tamga: unsupported machine file algorithm prefix %q", encPrefix)
 	}
+}
 
+// payloadFrom parses the decoded payload and enforces the signed claims.
+// Only ever reached with plaintext whose signature has already been
+// verified.
+func (f *MachineFile) payloadFrom(plaintext []byte) (*MachinePayload, error) {
 	var payload dataPayload[Machine]
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return nil, fmt.Errorf("tamga: invalid JSON in decoded machine file payload: %w", err)

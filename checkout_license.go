@@ -231,6 +231,13 @@ type LicensePayload struct {
 // against real server-issued files while still passing against a
 // self-generated test fixture that repeats the same mistake (see
 // checkout_license_test.go's dedicated regression test for exactly this).
+//
+// One key only. If the account has rotated its signing key, a file issued
+// before the rotation is authentic but fails here with ErrInvalidSignature
+// — indistinguishable from a forgery. VerifyWithKeySet
+// (checkout_key_set.go) is the rotation-aware equivalent and tells those
+// two apart; this method is the right call when you hold one key and know
+// it.
 func (f *LicenseFile) Verify(pub ed25519.PublicKey, licenseKey string) (*LicensePayload, error) {
 	sigBytes, err := base64.StdEncoding.DecodeString(f.Sig)
 	if err != nil {
@@ -245,15 +252,34 @@ func (f *LicenseFile) Verify(pub ed25519.PublicKey, licenseKey string) (*License
 	}
 
 	// Step 2: only now, after the signature has passed, decode enc.
+	plaintext, err := f.decodePlaintext(licenseKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return f.payloadFrom(plaintext)
+}
+
+// decodePlaintext performs step 2 of the pipeline — base64-decoding enc and,
+// for the AlgAES256GCMEd25519 variant, decrypting it under the license-key-
+// derived AES key.
+//
+// Extracted so the single-key and key-set entry points cannot drift into
+// decoding the same file two different ways; it is not a public step and
+// carries no judgement of its own about whether the bytes should be
+// trusted. (*LicenseFile).Verify reaches it only after the signature has
+// passed. (*LicenseFile).VerifyWithKeySet also calls it on its failure
+// path, to read the kid claim of a file that verified under no key at all —
+// see that method's doc comment for why that is sound.
+func (f *LicenseFile) decodePlaintext(licenseKey string) ([]byte, error) {
 	encBytes, err := base64.StdEncoding.DecodeString(f.Enc)
 	if err != nil {
 		return nil, fmt.Errorf("tamga: invalid base64 in license file enc: %w", err)
 	}
 
-	var plaintext []byte
 	switch f.Alg {
 	case AlgBase64Ed25519:
-		plaintext = encBytes
+		return encBytes, nil
 	case AlgAES256GCMEd25519:
 		if licenseKey == "" {
 			return nil, ErrLicenseKeyRequired
@@ -268,14 +294,20 @@ func (f *LicenseFile) Verify(pub ed25519.PublicKey, licenseKey string) (*License
 			return nil, fmt.Errorf("tamga: encrypted license file payload too short (%d bytes)", len(encBytes))
 		}
 		nonce, ciphertextAndTag := encBytes[:nonceSize], encBytes[nonceSize:]
-		plaintext, err = internalcrypto.OpenAESGCM(key, nonce, ciphertextAndTag)
-		if err != nil {
-			return nil, err
+		plaintext, oerr := internalcrypto.OpenAESGCM(key, nonce, ciphertextAndTag)
+		if oerr != nil {
+			return nil, oerr
 		}
+		return plaintext, nil
 	default:
 		return nil, fmt.Errorf("tamga: unsupported license file algorithm %q", f.Alg)
 	}
+}
 
+// payloadFrom performs step 3 — parsing the decoded payload and enforcing
+// the signed claims. Only ever reached with plaintext whose signature has
+// already been verified.
+func (f *LicenseFile) payloadFrom(plaintext []byte) (*LicensePayload, error) {
 	var payload dataPayload[License]
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return nil, fmt.Errorf("tamga: invalid JSON in decoded license file payload: %w", err)

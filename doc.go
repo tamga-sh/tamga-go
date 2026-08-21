@@ -192,6 +192,8 @@
 //   - health.go             Unauthenticated /v1/health probe
 //   - checkout_license.go   .lic file parse/verify (Ed25519 signature + HKDF-derived AES key)
 //   - checkout_machine.go   .machine file parse/verify (multi-scheme signature + HKDF key)
+//   - signing_key.go        Published signing keys, kid derivation, SigningKeySet
+//   - checkout_key_set.go   Rotation-aware VerifyWithKeySet for .lic and .machine files
 //   - proof.go              Offline proof generate/verify (RSA, byte-exact JSON serialization)
 //   - errors.go             JSON:API error model, APIError with Is()/As() code matching
 //

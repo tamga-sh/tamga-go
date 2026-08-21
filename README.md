@@ -288,6 +288,72 @@ PKCS#1 `RSAPublicKey` DER (270 bytes) or SPKI (294 bytes) depending on the endpo
 it; an Ed25519 key is the raw 32 bytes. `examples/checkout_machine/main.go::parsePublicKey`
 handles all four cases and is the copy-paste source.
 
+### Key rotation (`VerifyWithKeySet`)
+
+When an account rotates its Ed25519 signing key, a file signed **before** the rotation is still
+authentic — but against the single current key it fails with `ErrInvalidSignature`, the same
+error a forgery produces. A paying customer gets locked out and the error points support at the
+wrong problem.
+
+`VerifyWithKeySet` verifies against every key the account has ever held, so the two outcomes stop
+being the same error:
+
+```go
+// One call, cacheable for the life of the process: a rotation adds a key,
+// it never invalidates the ones already there.
+keys, err := client.GetSigningKeySet(ctx)
+if err != nil {
+	log.Fatal(err)
+}
+
+verified, err := file.VerifyWithKeySet(keys, licenseKey)
+
+var unknownKey *tamga.UnknownSigningKeyError
+switch {
+case err == nil:
+	if verified.Key.IsRetired() {
+		// Authentic, and issued before the last rotation. Nothing is wrong
+		// with it — but this client is due a fresh checkout.
+		log.Printf("verified under retired key %s", verified.Key.ID)
+	}
+	fmt.Println(verified.Payload.Data.Attributes.Status)
+
+case errors.Is(err, tamga.ErrUnknownSigningKey):
+	// NOT a forgery. The file names a key this set does not hold, which is
+	// what a genuine pre-rotation file looks like against a stale set.
+	errors.As(err, &unknownKey)
+	log.Printf("stale key set: file names %s, we hold %v", unknownKey.KeyID, unknownKey.Available)
+
+case errors.Is(err, tamga.ErrSigningKeyNotPublished):
+	// The account that signed this has published no Ed25519 key at all, so
+	// it signed with the id of the empty string. Refreshing cannot fix it.
+	log.Print("server published no signing key; an operator must rotate one in")
+
+case errors.Is(err, tamga.ErrInvalidSignature):
+	// The key it names IS in the set and rejects these bytes. Refuse it.
+	log.Print("tampered file")
+}
+```
+
+`(*MachineFile).VerifyWithKeySet` takes the same set alongside the scheme, license key and
+fingerprint.
+
+**Reading the key set without the API.** `GET /signing-keys` authorizes on `account.read`, which
+a license-key credential does not hold — an embedded client gets `403` there unconditionally.
+Pin the public keys in your binary instead:
+
+```go
+keys, err := tamga.NewSigningKeySetFromPublicKeys(currentPubKeyB64, previousPubKeyB64)
+```
+
+That path is strict on purpose: a mistyped key fails at startup rather than reporting every
+genuine file in the field as signed by an unknown key. `tamga.KeyID(publicKeyB64)` computes the
+`kid` a file signed with that key will name — note it hashes the **base64 string**, never the 32
+decoded bytes.
+
+Both existing entry points are untouched: `Verify` keeps its exact signature and behaviour and
+remains the right call when you hold one key and know it.
+
 ### Offline proofs
 
 A lighter alternative to a full machine checkout: `GenerateOfflineProof` returns a
