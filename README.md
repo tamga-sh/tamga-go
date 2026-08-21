@@ -141,6 +141,7 @@ the machine lifecycle, and entitlement checks — `go run ./examples/validate -h
 | `GetArtifact(id)` | `GET /artifacts/{id}` | Metadata only; `RedirectURL` is always nil here. |
 | `ArtifactDownloadURL(id, opts)` | `GET /artifacts/{id}/actions/download` | Sends `?redirect=false` and never follows a redirect. Returns the presigned URL. |
 | `DownloadArtifact(id, opts)` | — | The URL above, fetched from storage with **no** credentials attached. |
+| `CanonicalFingerprint(components...)` | — | Pure function. Canonicalises caller-chosen components into a stable fingerprint. |
 | `Health()` | `GET /v1/health` | Sent with **no credential** and no account prefix; flat body, not JSON:API. |
 
 Re-activating a machine that is already registered is a `409 FINGERPRINT_TAKEN` from
@@ -159,6 +160,56 @@ resolved: adopting that row would attach the caller to a seat its license does n
 machine resource carries no `license_id` with which it could ever notice. Unlike
 `ActivateMachine`, an over-limit verdict on the recovery path does **not** delete the machine —
 it was already there.
+
+## Machine fingerprints
+
+The server stores `fingerprint TEXT NOT NULL` — no length limit, no `CHECK`, no normalisation —
+unique per `(license_id, fingerprint)`. Sent raw, `"ABC-123"`, `"abc-123"` and `" ABC-123 "` are
+three machines holding three seats against the same policy limit. Every Tamga SDK used to send
+the caller's string byte-for-byte, this one included.
+
+`CanonicalFingerprint` is a pure function that turns caller-chosen, labelled components into a
+stable 64-character hex digest:
+
+```go
+fp, err := tamga.CanonicalFingerprint(
+    tamga.FingerprintComponent{Label: "machine-id", Value: machineID},
+    tamga.FingerprintComponent{Label: "disk", Value: diskSerial},
+)
+if err != nil {
+    return err // errors.Is(err, tamga.ErrInvalidFingerprintComponent)
+}
+machine, meta, err := client.ActivateMachine(ctx, tamga.CreateMachineOptions{
+    LicenseID:   licenseID,
+    Fingerprint: fp,
+}, nil)
+```
+
+Component order does not matter, leading and trailing ASCII whitespace is trimmed, and case is
+**preserved** — lowercasing a base64 or hex identifier corrupts it, so `"ABC123"` and `"abc123"`
+are deliberately different machines.
+
+**It reads no hardware identifiers, and it never will.** What identifies a machine is a product
+decision: a cloned VM template shares its board and disk serials, a container has none, and a
+replaced motherboard changes them. No default is right for both a desktop application and a
+Kubernetes sidecar, and eight SDKs each guessing would disagree silently — which is
+double-billing, not a warning. Choose the components yourself.
+
+Values are **not** Unicode-normalised, and that is a constraint rather than an oversight: NFC
+needs a new dependency in Go and Rust and ICU or hand-rolled tables in C11, and a rule the eight
+ports cannot implement identically would yield two fingerprints for one machine depending on
+which SDK the application was written in. Normalise before calling if your values can arrive in
+more than one form.
+
+Invalid input is an **error**, never a silent repair — an empty or repeated label, a non-ASCII
+or `=`-bearing label, a control character in a value, or no components at all. Stripping a
+control character or deduplicating a repeated label would map two different inputs onto one
+canonical string, and therefore two machines onto one seat, which is the bug the function exists
+to prevent.
+
+The algorithm is pinned by [`testdata/fingerprint-vectors.json`](testdata/fingerprint-vectors.json),
+a cross-SDK vector set produced by an independent SHA-256 implementation — not by any SDK — so a
+port cannot pass merely by agreeing with itself.
 
 ## Artifacts
 

@@ -39,6 +39,23 @@
 // Client.ResetHeartbeat and Client.GenerateOfflineProof are role-gated
 // above it and return 403 unconditionally under WithLicenseKey.
 //
+// # Machine fingerprints
+//
+// The server stores a fingerprint verbatim — no length limit, no CHECK, no
+// normalisation — and its uniqueness constraint is over the raw bytes, per
+// license. So "ABC-123", "abc-123" and " ABC-123 " are three machines
+// holding three seats against the same policy limit. CanonicalFingerprint
+// takes caller-chosen labelled components and returns a stable 64-character
+// hex digest that collapses the whitespace variants and makes the caller's
+// component order irrelevant, while deliberately preserving case.
+//
+// It reads no hardware identifiers, and that is not an omission: what
+// identifies a machine is a product decision. A cloned VM template shares
+// its board and disk serials, a container has none, and a replaced
+// motherboard changes them — no default is right for both a desktop
+// application and a Kubernetes sidecar. Choose the components, then pass
+// them in.
+//
 // # Artifacts
 //
 // Once CheckUpgrade reports a newer release, ListReleaseArtifacts and
@@ -204,6 +221,7 @@
 //   - policy_read.go        Policy/license reads, policy-derived heartbeat window
 //   - release.go            Release resource and the auto-update check
 //   - artifact.go           Artifact resource, list/get, presigned download URL
+//   - fingerprint.go        CanonicalFingerprint — stable machine fingerprints
 //   - health.go             Unauthenticated /v1/health probe
 //   - checkout_license.go   .lic file parse/verify (Ed25519 signature + HKDF-derived AES key)
 //   - checkout_machine.go   .machine file parse/verify (multi-scheme signature + HKDF key)
