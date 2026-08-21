@@ -73,7 +73,7 @@ Keep it alive with `NewHeartbeatScheduler(client, machine.ID, tamga.DefaultHeart
 and `(*HeartbeatScheduler).Run(ctx)`, which pings until the context is canceled.
 
 > **`HeartbeatStatus == DEAD` does not mean the machine was culled.** It means only that the
-> last ping is older than the 600s window. The server derives the status from
+> last ping is older than the heartbeat window. The server derives the status from
 > `last_heartbeat_at` alone and never looks at the policy's `require_heartbeat` flag, and the
 > culling job that would delete the row early-returns unless `require_heartbeat` is set — which
 > it is **not**, by default. A machine can report `DEAD` forever while its row and its seat are
@@ -335,9 +335,14 @@ Every claim below is implemented at the cited location.
 - **Machine `Memory` and `Disk` are MEGABYTES, not bytes** — on both `MachineAttributes` and
   `CreateMachineOptions`. Reporting 16 GiB as `17179869184` rather than `16384` inflates the
   license's memory counter by 1048576× and trips `MEMORY_LIMIT_EXCEEDED` on its next activation.
-- **The machine heartbeat window is a hardcoded 600s**, not driven by the policy's
-  `heartbeat_duration` field despite that field existing (`machine.go`, `HeartbeatStatus`).
-  `DefaultHeartbeatInterval` is window/3.
+- **The machine heartbeat window is policy-driven, but this SDK's default interval is not.**
+  The server judges a machine against its policy's `heartbeat_duration` when that field is set,
+  and falls back to 600s only when it is null. `DefaultHeartbeatInterval` is window/3 computed
+  against that 600s fallback, so on a policy with a shorter `heartbeat_duration` the default
+  ping rate is too slow and machines read `DEAD` between ticks. Those callers must pass an
+  explicit interval to `NewHeartbeatScheduler` — and today they must learn their own window out
+  of band, because this SDK models the field as `PolicyAttributes.HeartbeatDuration` but exposes
+  no call that returns a `Policy` (`machine.go`, `HeartbeatStatus`).
 - **`HeartbeatStatus == DEAD` reports staleness, not deletion.** The server computes it purely
   from `last_heartbeat_at` versus the window and never consults the policy's `require_heartbeat`
   flag, so a machine reports `DEAD` indefinitely with its row and seat intact. Culling is a

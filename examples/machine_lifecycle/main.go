@@ -87,7 +87,7 @@ func main() {
 		defer cancel()
 
 		// A DEAD heartbeat_status is NOT a stop condition. It reports only
-		// that the previous ping fell outside the hardcoded 600s window —
+		// that the previous ping fell outside the heartbeat window —
 		// the machine row and its seat are still there (under the default
 		// policy, require_heartbeat = false, they stay there for good), and
 		// the very ping that reported DEAD has already revived it. So this
@@ -109,6 +109,10 @@ func main() {
 			}
 		}
 
+		// Interval 0 takes DefaultHeartbeatInterval, which is window/3 of
+		// the server's 600s *fallback* window. That is only correct for a
+		// policy that leaves heartbeat_duration null; a policy with a
+		// shorter window needs an explicit interval passed here.
 		scheduler := tamga.NewHeartbeatScheduler(client, machine.ID, 0 /* use the recommended default interval */, tamga.WithHeartbeatOnTick(onTick))
 		fmt.Println("running heartbeat scheduler for a few ticks (this will take a while at the real ~200s default interval)...")
 		if runErr := scheduler.Run(hbCtx); runErr != nil {

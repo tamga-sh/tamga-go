@@ -29,6 +29,13 @@ type Machine struct {
 // 16 GiB as 17179869184 rather than 16384 inflates those counters by a
 // factor of 1048576 and trips the limit on the license's very next
 // activation.
+//
+// NextHeartbeatAt is the server's own view of when the next ping is due:
+// last_heartbeat_at plus the effective window. It is not a dependable read
+// of the policy's window on every route — the ping and reset-heartbeat
+// routes do not join the policy, so a PingHeartbeat response derives both
+// NextHeartbeatAt and HeartbeatStatus from the 600s fallback whatever the
+// policy says. See HeartbeatStatus's doc comment for the window itself.
 type MachineAttributes struct {
 	Platform        *string         `json:"platform"`
 	NextHeartbeatAt *string         `json:"next_heartbeat_at"`
@@ -52,9 +59,19 @@ type MachineAttributes struct {
 // so an unrecognized wire value decodes cleanly rather than failing
 // (forward-compatible with a future server-side addition).
 //
-// The window is a hardcoded 600s (10 min), not driven by
-// policy.heartbeat_duration despite that field existing on Policy
-// (the Tamga API protocol specification's Known Server-Side Gaps #8).
+// The window is policy-driven: the server judges a machine against its
+// policy's heartbeat_duration when that field is set, and falls back to
+// 600s (10 min) only when it is null.
+//
+// ⚠️ This SDK does not adapt to it. machineHeartbeatWindow — and so
+// DefaultHeartbeatInterval, which is derived from it — is computed
+// against the 600s fallback alone. On a policy that sets a shorter
+// heartbeat_duration the default ping rate is too slow: the machine goes
+// stale between ticks and reads DEAD. Such callers must pass their own
+// interval to NewHeartbeatScheduler, and today they must learn their own
+// window out of band — this SDK models the field as
+// PolicyAttributes.HeartbeatDuration but exposes no call that returns a
+// Policy.
 //
 // ⚠️ DEAD means ONLY "the last ping is older than the heartbeat window."
 // It does NOT mean the machine row was culled, deleted, or deactivated,
@@ -80,7 +97,8 @@ type MachineAttributes struct {
 type HeartbeatStatus string
 
 // Heartbeat status constants — see HeartbeatStatus's doc comment for the
-// state machine and the hardcoded-window gotcha.
+// state machine, and for why the window this is judged against is the
+// policy's rather than the one this SDK schedules on.
 const (
 	HeartbeatNotStarted  HeartbeatStatus = "NOT_STARTED"
 	HeartbeatAlive       HeartbeatStatus = "ALIVE"
@@ -88,8 +106,11 @@ const (
 	HeartbeatResurrected HeartbeatStatus = "RESURRECTED"
 )
 
-// machineHeartbeatWindow is the hardcoded 600-second (10 min) machine
-// heartbeat window — see HeartbeatStatus's doc comment.
+// machineHeartbeatWindow is the server's 600-second (10 min) *fallback*
+// machine heartbeat window, which applies only to a policy that leaves
+// heartbeat_duration null. It is a constant here because this SDK cannot
+// read the policy, so a shorter policy-configured window is not reflected
+// — see HeartbeatStatus's doc comment.
 const machineHeartbeatWindow = 600 * time.Second
 
 // CreateMachineOptions configures CreateMachine. Fingerprint and LicenseID
@@ -341,8 +362,11 @@ func (c *Client) ResetHeartbeat(ctx context.Context, machineID string) (*Machine
 
 // HeartbeatScheduler periodically calls PingHeartbeat for one machine
 // until its context is canceled. The recommended default interval is
-// window/3 (~200s for the hardcoded 600s machine window), available as
-// DefaultHeartbeatInterval.
+// window/3 (~200s against the server's 600s fallback window), available
+// as DefaultHeartbeatInterval. That default assumes the fallback: on a
+// policy that sets a shorter heartbeat_duration it pings too slowly and
+// the machine reads DEAD between ticks, so pass an explicit interval
+// instead — see HeartbeatStatus's doc comment.
 //
 // A DEAD status observed from a ping's response is NOT a stop condition,
 // and Run deliberately keeps pinging through it. DEAD only reports that
@@ -364,8 +388,9 @@ type HeartbeatScheduler struct {
 }
 
 // DefaultHeartbeatInterval is machineHeartbeatWindow/3 — the recommended
-// default HeartbeatScheduler interval, safely inside the hardcoded 600s
-// machine heartbeat window.
+// default HeartbeatScheduler interval, safely inside the server's 600s
+// fallback window but NOT inside a shorter policy-configured one. Only a
+// policy that leaves heartbeat_duration null is covered by this default.
 const DefaultHeartbeatInterval = machineHeartbeatWindow / 3
 
 // HeartbeatSchedulerOption configures a HeartbeatScheduler built via
@@ -553,9 +578,9 @@ type ProcessAttributes struct {
 }
 
 // processHeartbeatWindow is the hardcoded 30-second process heartbeat
-// window — much shorter than a machine's 600s, and with no resurrection
-// grace period: a dead process row is deleted immediately, no KEEP_DEAD
-// equivalent (Tamga API protocol specification §8).
+// window — much shorter than a machine's 600s default, and with no
+// resurrection grace period: a dead process row is deleted immediately,
+// no KEEP_DEAD equivalent (Tamga API protocol specification §8).
 const processHeartbeatWindow = 30 * time.Second
 
 // CreateProcessOptions configures CreateProcess. MachineID and PID are

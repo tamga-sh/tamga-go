@@ -76,8 +76,15 @@
 // # Machine heartbeats
 //
 // HeartbeatScheduler pings one machine on a timer
-// (DefaultHeartbeatInterval, window/3 of the hardcoded 600s window) until
-// its context is canceled.
+// (DefaultHeartbeatInterval, window/3) until its context is canceled.
+//
+// The server's window is the policy's heartbeat_duration when that field
+// is set, and 600s only as a fallback when it is null.
+// DefaultHeartbeatInterval is computed against that 600s fallback, so on
+// a policy with a shorter heartbeat_duration it pings too slowly and the
+// machine reads DEAD between ticks — pass an explicit interval instead.
+// This SDK exposes no call that returns a Policy, so such callers must
+// learn their own window out of band.
 //
 // The single most important thing to get right: a HeartbeatStatus of DEAD
 // means only that the last ping is older than the window. It does not
