@@ -318,7 +318,7 @@ func (f *MachineFile) decodePlaintext(encPrefix, licenseKey, fingerprint string)
 		}
 		return plaintext, nil
 	default:
-		return nil, fmt.Errorf("tamga: unsupported machine file algorithm prefix %q", encPrefix)
+		return nil, fmt.Errorf("%w: machine file algorithm prefix %q", ErrUnsupportedAlgorithm, encPrefix)
 	}
 }
 
@@ -389,18 +389,18 @@ const machineFileAlgV2Marker = "v2"
 func parseMachineFileAlg(alg string) (encPrefix, signSuffix string, err error) {
 	encPrefix, rest, ok := strings.Cut(alg, "+")
 	if !ok {
-		return "", "", fmt.Errorf("tamga: unsupported machine file algorithm %q", alg)
+		return "", "", fmt.Errorf("%w: machine file algorithm %q", ErrUnsupportedAlgorithm, alg)
 	}
 	sep := strings.LastIndex(rest, "+")
 	if sep < 0 {
-		return "", "", fmt.Errorf("tamga: machine file algorithm %q has no +%s format marker (pre-v2 file)", alg, machineFileAlgV2Marker)
+		return "", "", fmt.Errorf("%w: machine file algorithm %q has no +%s format marker (pre-v2 file)", ErrUnsupportedAlgorithm, alg, machineFileAlgV2Marker)
 	}
 	signSuffix, marker := rest[:sep], rest[sep+1:]
 	if marker != machineFileAlgV2Marker {
-		return "", "", fmt.Errorf("tamga: machine file algorithm %q has no +%s format marker (pre-v2 file)", alg, machineFileAlgV2Marker)
+		return "", "", fmt.Errorf("%w: machine file algorithm %q has no +%s format marker (pre-v2 file)", ErrUnsupportedAlgorithm, alg, machineFileAlgV2Marker)
 	}
 	if encPrefix == "" || signSuffix == "" {
-		return "", "", fmt.Errorf("tamga: unsupported machine file algorithm %q", alg)
+		return "", "", fmt.Errorf("%w: machine file algorithm %q", ErrUnsupportedAlgorithm, alg)
 	}
 	return encPrefix, signSuffix, nil
 }

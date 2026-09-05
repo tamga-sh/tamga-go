@@ -418,9 +418,12 @@ case errors.Is(err, tamga.ErrUnknownSigningKey):
 	log.Printf("stale key set: file names %s, we hold %v", unknownKey.KeyID, unknownKey.Available)
 
 case errors.Is(err, tamga.ErrSigningKeyNotPublished):
-	// The account that signed this has published no Ed25519 key at all, so
-	// it signed with the id of the empty string. Refreshing cannot fix it.
-	log.Print("server published no signing key; an operator must rotate one in")
+	// A pre-patch file: the account had published no Ed25519 key when it
+	// was issued, so it signed with the id of the empty string. A patched
+	// server publishes one from creation and refuses check-out with
+	// 422 SIGNING_KEY_MISSING instead, so a fresh checkout — not a key-set
+	// refresh — is the fix.
+	log.Print("pre-patch file signed with the empty-key id; request a fresh checkout")
 
 case errors.Is(err, tamga.ErrInvalidSignature):
 	// The key it names IS in the set and rejects these bytes. Refuse it.
@@ -560,9 +563,13 @@ Every claim below is implemented at the cited location.
   now genuinely enforced: entitlements takes entitlement **codes** (case-insensitive,
   de-duplicated, satisfied by direct or policy-inherited rows; an empty slice asserts nothing),
   and fingerprint matches any machine on the license regardless of heartbeat status.
-- **8 of the 24 `ValidationCode` values are unreachable against the current server.** Each
+- **5 of the 24 `ValidationCode` values are unreachable against the patched server.** Each
   constant in `validation.go` is marked reachable or not; do not branch on a value that cannot
-  come back today. `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` are reachable now.
+  come back today. `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` are reachable, and
+  since the API patch so are `HEARTBEAT_NOT_STARTED` / `HEARTBEAT_DEAD` (emitted by the
+  fingerprint scope when `policy.require_heartbeat` is set) and `TOO_MANY_USERS` (all three
+  validate routes). None of those three is an over-limit code, so `ActivateMachine` never rolls
+  back on them.
 - **`GET /licenses/{id}/entitlements` is not paginable.** The listing unions the license's
   direct entitlements with the ones inherited from its policy, which a single keyset cursor
   cannot describe, so the server accepts `page[after]` and ignores it — the same first page

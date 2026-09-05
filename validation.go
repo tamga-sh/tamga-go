@@ -10,20 +10,25 @@ import "time"
 // — callers that only recognize known constants should fall back to a
 // default case on switch.
 //
-// Only 16 of the 24 values below are reachable against the current server
-// implementation; the rest are declared for schema completeness and
-// forward-compatibility. Each constant below is marked reachable (✅) or
-// not (⛔) as of the server behavior documented in the Tamga API protocol
-// specification §2 — do not build product logic around a ⛔ value returning
-// from a live call today.
+// Only 19 of the 24 values below are reachable against the patched server;
+// the rest are declared for schema completeness and forward-compatibility.
+// Each constant below is marked reachable (✅) or not (⛔) as of the server
+// behavior documented in the Tamga API protocol specification §2 — do not
+// build product logic around a ⛔ value returning from a live call today.
 //
-// ENTITLEMENTS_MISSING and FINGERPRINT_SCOPE_MISMATCH moved from ⛔ to ✅:
-// the server now genuinely enforces scope.entitlements and
-// scope.fingerprint. VERSION_SCOPE_MISMATCH and CHECKSUM_SCOPE_MISMATCH
-// are still ⛔ but for a new reason — the server no longer ignores those
-// two scope fields, it rejects the whole call with 422
-// SCOPE_NOT_SUPPORTED, so neither code can ever be the outcome. See
-// Scope in license.go.
+// The server evaluates validate-by-id in this order, first failing check
+// wins: SUSPENDED, EXPIRED, OVERDUE, FINGERPRINT_SCOPE_MISMATCH,
+// HEARTBEAT_NOT_STARTED, HEARTBEAT_DEAD, ENTITLEMENTS_MISSING,
+// PRODUCT_SCOPE_MISMATCH, POLICY_SCOPE_MISMATCH, USER_SCOPE_MISMATCH,
+// ENVIRONMENT_SCOPE_MISMATCH, TOO_MANY_MACHINES, TOO_MANY_CORES,
+// TOO_MUCH_MEMORY, TOO_MUCH_DISK, TOO_MANY_PROCESSES, TOO_MANY_USERS,
+// TOO_MANY_USES, then VALID.
+//
+// HEARTBEAT_NOT_STARTED, HEARTBEAT_DEAD and TOO_MANY_USERS moved from ⛔
+// to ✅ with the API patch: the fingerprint scope emits the two heartbeat
+// verdicts when policy.require_heartbeat is set, and all three validate
+// endpoints emit TOO_MANY_USERS. None of the three joins isOverageCode —
+// activation creates no users, and a heartbeat verdict is not a seat limit.
 type ValidationCode string
 
 const (
@@ -70,11 +75,17 @@ const (
 	// case-insensitively and de-duplicated; an empty list asserts
 	// nothing. ✅ reachable.
 	ValidationCodeEntitlementsMissing ValidationCode = "ENTITLEMENTS_MISSING"
-	// ValidationCodeTooManyUsers declared in the enum, never emitted. ⛔ unreachable.
+	// ValidationCodeTooManyUsers users over policy.max_users, from all
+	// three validate endpoints. Not an over-limit code: ActivateMachine
+	// does not roll back on it. ✅ reachable.
 	ValidationCodeTooManyUsers ValidationCode = "TOO_MANY_USERS"
-	// ValidationCodeHeartbeatDead declared in the enum, never emitted. ⛔ unreachable.
+	// ValidationCodeHeartbeatDead scope.fingerprint matched a machine whose
+	// last ping is outside the window, under policy.require_heartbeat.
+	// Emitted by the fingerprint scope only, never by a ping — PingHeartbeat
+	// derives its own status from the timestamp it just wrote. ✅ reachable.
 	ValidationCodeHeartbeatDead ValidationCode = "HEARTBEAT_DEAD"
-	// ValidationCodeHeartbeatNotStarted declared in the enum, never emitted. ⛔ unreachable.
+	// ValidationCodeHeartbeatNotStarted scope.fingerprint matched a machine
+	// that has never pinged, under policy.require_heartbeat. ✅ reachable.
 	ValidationCodeHeartbeatNotStarted ValidationCode = "HEARTBEAT_NOT_STARTED"
 	// ValidationCodeFingerprintScopeMismatch scope.fingerprint matched no
 	// machine registered on the license. Any machine counts, whatever its

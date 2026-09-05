@@ -491,6 +491,9 @@ func TestMachineFileVerify_ServerFixtures_RejectsNonV2Alg(t *testing.T) {
 				if errors.Is(err, ErrInvalidSignature) {
 					t.Errorf("alg %q rejected as ErrInvalidSignature; the alg gate must run before signature verification", alg)
 				}
+				if !errors.Is(err, ErrUnsupportedAlgorithm) {
+					t.Errorf("alg %q rejected as %v, want ErrUnsupportedAlgorithm so every entry point reports a pre-v2 file the same way", alg, err)
+				}
 			}
 
 			// An unrecognized encoding prefix is refused too. This one is

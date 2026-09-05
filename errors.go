@@ -1,6 +1,13 @@
 package tamga
 
-import "errors"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	internalcrypto "github.com/tamga-sh/tamga-go/internal/crypto"
+)
 
 // Error models a single JSON:API error object as returned by the Tamga API:
 //
@@ -11,11 +18,72 @@ import "errors"
 // versions.
 type Error struct {
 	Source *ErrorSource `json:"source,omitempty"`
-	ID     string       `json:"id,omitempty"`
-	Status string       `json:"status,omitempty"`
-	Code   string       `json:"code,omitempty"`
-	Title  string       `json:"title,omitempty"`
-	Detail string       `json:"detail,omitempty"`
+	// Meta is the error object's optional meta member, decoded leniently as
+	// whatever JSON object the server sent; nil when absent. Today one code
+	// populates it: a 409 FINGERPRINT_TAKEN carries {"machineId": "<uuid>"}
+	// when — and only when — the machine already holding the fingerprint is
+	// on the license the create was addressed to. Read it through
+	// (*APIError).ConflictingMachineID rather than by key.
+	//
+	// Trailing field, keyed literals only: no unkeyed Error literal exists
+	// in this module or its tests, and fieldalignment wants the pointer
+	// fields ahead of the strings.
+	Meta   map[string]any `json:"meta,omitempty"`
+	ID     string         `json:"id,omitempty"`
+	Status string         `json:"status,omitempty"`
+	Code   string         `json:"code,omitempty"`
+	Title  string         `json:"title,omitempty"`
+	Detail string         `json:"detail,omitempty"`
+}
+
+// UnmarshalJSON decodes an error object, accepting status as either the
+// JSON string the server renders ("422") or a JSON number (422). Status
+// stays a string: callers compare it as one, and the HTTP status the error
+// arrived with is on APIError.HTTPStatus anyway. Any other JSON type for
+// status is an error, so a malformed envelope still degrades to UNKNOWN in
+// mapError rather than being half-read.
+func (e *Error) UnmarshalJSON(b []byte) error {
+	// Slice last for fieldalignment; every other field carries a pointer.
+	var wire struct {
+		Source *ErrorSource    `json:"source"`
+		Meta   map[string]any  `json:"meta"`
+		ID     string          `json:"id"`
+		Code   string          `json:"code"`
+		Title  string          `json:"title"`
+		Detail string          `json:"detail"`
+		Status json.RawMessage `json:"status"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		return err
+	}
+	status, err := decodeErrorStatus(wire.Status)
+	if err != nil {
+		return err
+	}
+	*e = Error{Source: wire.Source, Meta: wire.Meta, ID: wire.ID, Status: status, Code: wire.Code, Title: wire.Title, Detail: wire.Detail}
+	return nil
+}
+
+// decodeErrorStatus renders a raw status member as the string this package
+// has always carried: "" for absent or null, the string itself, or the
+// number's decimal text.
+func decodeErrorStatus(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", nil
+	}
+	if raw[0] == '"' {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return "", err
+		}
+		return s, nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return "", fmt.Errorf("tamga: error object status must be a string or a number, got %s", raw)
+	}
+	return n.String(), nil
 }
 
 // ErrorSource carries the JSON:API error object's optional source.pointer,
@@ -75,6 +143,28 @@ func (e *APIError) As(target any) bool {
 	return true
 }
 
+// ConflictingMachineID returns the id of the machine that already holds the
+// fingerprint a 409 FINGERPRINT_TAKEN refused, and true, when the server
+// supplied it in meta.machineId.
+//
+// The server sends it only when that machine is on the license the create
+// was addressed to (API patch, machines/service.rs), so a returned id is
+// always the caller's own seat, never another license's. A cross-license
+// conflict under UNIQUE_PER_POLICY or UNIQUE_PER_ACCOUNT carries no meta and
+// answers ("", false); so does any other code, and any pre-patch server.
+// ActivateMachineIdempotent uses this as its fast path ahead of
+// FindMachineByFingerprint.
+func (e *APIError) ConflictingMachineID() (string, bool) {
+	if e == nil || e.Err.Code != ErrFingerprintTaken.Err.Code {
+		return "", false
+	}
+	id, ok := e.Err.Meta["machineId"].(string)
+	if !ok || id == "" {
+		return "", false
+	}
+	return id, true
+}
+
 // Sentinel errors, fixed-status codes (Tamga API protocol specification
 // §11). Match against these with errors.Is; a real *APIError always
 // carries the server's own Detail/HTTPStatus, these sentinels only pin the
@@ -104,6 +194,16 @@ var (
 	ErrLicenseKeyMissing   = &APIError{HTTPStatus: 422, Err: Error{Code: "LICENSE_KEY_MISSING"}}
 	ErrSchemeNotSupported  = &APIError{HTTPStatus: 422, Err: Error{Code: "SCHEME_NOT_SUPPORTED"}}
 	ErrDatasetInvalid      = &APIError{HTTPStatus: 422, Err: Error{Code: "DATASET_INVALID"}}
+	// ErrSigningKeyMissing: the account holds no signing key for the
+	// operation — a license or machine check-out, or an offline proof —
+	// and the server refuses (422) rather than signing with nothing. Pre-
+	// patch servers signed anyway and stamped UnpublishedSigningKeyID into
+	// the file. Not retryable: an operator rotates a key in.
+	ErrSigningKeyMissing = &APIError{HTTPStatus: 422, Err: Error{Code: "SIGNING_KEY_MISSING"}}
+	// ErrSecretKeyMissing: token minting was refused because the account
+	// has no secret key configured. Same remedy class as
+	// ErrSigningKeyMissing — server-side configuration, never retryable.
+	ErrSecretKeyMissing = &APIError{HTTPStatus: 422, Err: Error{Code: "SECRET_KEY_MISSING"}}
 )
 
 // Create-time policy-limit sentinels (HTTP 422). These are emitted by
@@ -192,6 +292,22 @@ var (
 	// decryption — machine files, unlike license files, need both the
 	// license key AND the target machine's fingerprint to decrypt.
 	ErrFingerprintRequired = errors.New("tamga: machine fingerprint is required to decrypt an encrypted machine file")
+	// ErrUnsupportedAlgorithm is returned by every verifying entry point —
+	// (*LicenseFile).Verify and VerifyWithKeySet, (*MachineFile).Verify and
+	// VerifyWithKeySet — when the file's alg is not a recognized "+v2"
+	// value. It is the FIRST check each of them makes, before any key is
+	// consulted or any signature checked, so a pre-v2 or unknown file is
+	// reported identically from every entry point and never as
+	// ErrInvalidSignature (D17).
+	ErrUnsupportedAlgorithm = errors.New("tamga: unsupported checkout file algorithm")
+	// ErrDecryptionFailed is returned when the signature VERIFIED and the
+	// AES-256-GCM open then failed. After a good signature that can only
+	// mean the wrong license key — or, for a machine file, the wrong
+	// fingerprint — never a forgery, which is why it is distinct from
+	// ErrInvalidSignature (D16). It is the same value as
+	// internal/crypto.ErrDecryptionFailed, re-exported so callers can match
+	// it without importing an internal package.
+	ErrDecryptionFailed = internalcrypto.ErrDecryptionFailed
 	// ErrMachineOverLimit is returned by ActivateMachine when a policy
 	// limit blocks activation. It covers both of the two places the
 	// server can enforce that limit, so a caller only has to match one

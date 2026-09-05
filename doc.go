@@ -215,7 +215,7 @@
 //   - machine.go            Machine/Component/Process CRUD, heartbeats, schedulers
 //   - machine_read.go       Machine get/list/update, fingerprint lookup, re-activation
 //   - process_read.go       Machine process listing, process delete, scheduler disposal
-//   - validation.go         ValidationCode string enum (24 values, 16 reachable today)
+//   - validation.go         ValidationCode string enum (24 values, 19 reachable)
 //   - entitlement.go        Entitlement resource, list/get, HasEntitlement(code) helper
 //   - policy.go             LicenseScheme/OverageStrategy/heartbeat enums, Policy resource
 //   - policy_read.go        Policy/license reads, policy-derived heartbeat window

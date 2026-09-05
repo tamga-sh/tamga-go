@@ -414,3 +414,132 @@ func TestActivateMachineIdempotent_PassesThroughANonConflictError(t *testing.T) 
 		t.Fatalf("errors.Is(err, ErrLicenseNotAllowed) = false, err = %v", err)
 	}
 }
+
+type idempotentActivationCalls struct {
+	gets, lists, deletes int
+}
+
+// idempotentActivationServerV2 wires the create (answering conflictBody), the
+// by-id read (answering getBody, or 404 when it is ""), the license-scoped
+// search (answering listBody) and the validate.
+func idempotentActivationServerV2(t *testing.T, conflictBody, getBody, listBody, validateMeta string) (*Client, func(), *idempotentActivationCalls) {
+	t.Helper()
+	calls := &idempotentActivationCalls{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/accounts/acct-123/machines", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		if r.Method == http.MethodGet {
+			calls.lists++
+			_, _ = w.Write([]byte(listBody))
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(conflictBody))
+	})
+	mux.HandleFunc("/v1/accounts/acct-123/machines/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		switch r.Method {
+		case http.MethodDelete:
+			calls.deletes++
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodGet:
+			calls.gets++
+			if getBody == "" {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found","detail":"gone"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(getBody))
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/v1/accounts/acct-123/licenses/lic-1/actions/validate", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":` + representativeLicenseJSON + `,"meta":` + validateMeta + `}`))
+	})
+	server := httptest.NewServer(mux)
+	c, err := New("acct-123", WithBaseURL(server.URL), WithLicenseKey("lic-abc"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return c, server.Close, calls
+}
+
+// Exact wire shape from the API plan: a same-license FINGERPRINT_TAKEN names
+// the machine in meta.machineId. status is a JSON number here so the fast
+// path is proven against the D18 representation as well.
+const sameLicenseConflictJSON = `{"errors":[{"id":"e1","status":409,"code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"already activated","meta":{"machineId":"m-existing"}}]}`
+
+// A cross-license conflict (or any pre-patch server) carries no meta.
+const crossLicenseConflictJSON = `{"errors":[{"id":"e1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"already activated"}]}`
+
+const validMetaJSON = `{"ts":"2026-01-01T00:00:00Z","valid":true,"detail":"ok","code":"VALID"}`
+
+const emptyMachinePageJSON = `{"data":[],"meta":{"page":{"number":1,"size":100,"total":0,"totalPages":0}}}`
+
+func TestActivateMachineIdempotent_AdoptsTheMachineTheConflictNames(t *testing.T) {
+	c, closeFn, calls := idempotentActivationServerV2(t, sameLicenseConflictJSON,
+		`{"data":`+machineJSONWithFingerprint("m-existing", "fp-abc")+`}`, emptyMachinePageJSON, validMetaJSON)
+	defer closeFn()
+
+	machine, meta, err := c.ActivateMachineIdempotent(context.Background(),
+		CreateMachineOptions{Fingerprint: "fp-abc", LicenseID: "lic-1"}, nil)
+	if err != nil {
+		t.Fatalf("ActivateMachineIdempotent() error = %v", err)
+	}
+	if machine == nil || machine.ID != "m-existing" {
+		t.Fatalf("machine = %+v, want the machine meta.machineId named", machine)
+	}
+	if meta == nil || meta.Code != ValidationCodeValid {
+		t.Fatalf("meta = %+v", meta)
+	}
+	if calls.gets != 1 || calls.lists != 0 {
+		t.Errorf("gets = %d, lists = %d; want one GET by id and no paginated search", calls.gets, calls.lists)
+	}
+	if calls.deletes != 0 {
+		t.Errorf("issued %d deletes; an adopted machine must never be rolled back", calls.deletes)
+	}
+}
+
+func TestActivateMachineIdempotent_SearchesWhenTheConflictCarriesNoMeta(t *testing.T) {
+	c, closeFn, calls := idempotentActivationServerV2(t, crossLicenseConflictJSON, "",
+		`{"data":[`+machineJSONWithFingerprint("m-existing", "fp-abc")+`],"meta":{"page":{"number":1,"size":100,"total":1,"totalPages":1}}}`,
+		validMetaJSON)
+	defer closeFn()
+
+	machine, _, err := c.ActivateMachineIdempotent(context.Background(),
+		CreateMachineOptions{Fingerprint: "fp-abc", LicenseID: "lic-1"}, nil)
+	if err != nil {
+		t.Fatalf("ActivateMachineIdempotent() error = %v", err)
+	}
+	if machine == nil || machine.ID != "m-existing" {
+		t.Fatalf("machine = %+v", machine)
+	}
+	if calls.gets != 0 || calls.lists != 1 {
+		t.Errorf("gets = %d, lists = %d; without meta.machineId there is nothing to GET", calls.gets, calls.lists)
+	}
+}
+
+func TestActivateMachineIdempotent_FallsBackToTheSearchWhenTheNamedMachineIsGone(t *testing.T) {
+	// The named row was deleted between the two calls: the GET 404s, the
+	// search finds nothing, and the caller sees the original 409 — never a
+	// NOT_FOUND it did not ask about.
+	c, closeFn, calls := idempotentActivationServerV2(t, sameLicenseConflictJSON, "", emptyMachinePageJSON, validMetaJSON)
+	defer closeFn()
+
+	machine, meta, err := c.ActivateMachineIdempotent(context.Background(),
+		CreateMachineOptions{Fingerprint: "fp-abc", LicenseID: "lic-1"}, nil)
+	if !errors.Is(err, ErrFingerprintTaken) {
+		t.Fatalf("errors.Is(err, ErrFingerprintTaken) = false, err = %v", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Error("the 404 from the by-id read leaked; the conflict is the honest answer")
+	}
+	if machine != nil || meta != nil {
+		t.Errorf("machine = %+v, meta = %+v; both must be nil", machine, meta)
+	}
+	if calls.gets != 1 || calls.lists != 1 {
+		t.Errorf("gets = %d, lists = %d; want the GET tried, then the search", calls.gets, calls.lists)
+	}
+}

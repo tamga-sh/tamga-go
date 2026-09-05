@@ -120,6 +120,10 @@ func unverifiedKeyID(plaintext []byte) string {
 //     ErrSigningKeyNotPublished) instead. Refreshing will not help: the
 //     account that signed the file has published no Ed25519 key at all and
 //     an operator has to rotate one in.
+//   - the file's alg is not a +v2 value → ErrUnsupportedAlgorithm, before
+//     any key is tried. Same error, same ordering, as Verify (D17).
+//   - a held key verified and decryption then failed → ErrDecryptionFailed.
+//     The wrong licence key, never a forgery: the signature already passed.
 //   - the set holds nothing usable (it is empty) → ErrNoUsableSigningKey.
 //     Nothing about the file was judged, because there was nothing to judge
 //     it against.
@@ -136,6 +140,12 @@ func unverifiedKeyID(plaintext []byte) string {
 // licenseKey is required only for the encrypted variant, exactly as in
 // Verify — pass "" for a plain AlgBase64Ed25519 file.
 func (f *LicenseFile) VerifyWithKeySet(keys *SigningKeySet, licenseKey string) (*VerifiedLicenseFile, error) {
+	// Step 0: the same format gate Verify runs first, before any key is
+	// tried. See validateLicenseFileAlg.
+	if err := validateLicenseFileAlg(f.Alg); err != nil {
+		return nil, err
+	}
+
 	sigBytes, err := base64.StdEncoding.DecodeString(f.Sig)
 	if err != nil {
 		return nil, fmt.Errorf("tamga: invalid base64 in license file signature: %w", err)
@@ -254,17 +264,19 @@ func (f *MachineFile) VerifyWithKeySet(scheme LicenseScheme, keys *SigningKeySet
 }
 
 // unverifiableFileError decides what to report when no key verified a file
-// AND its payload could not even be decoded to read the kid.
+// AND its payload could not even be decoded to read the kid. It applies
+// ONLY on that failure path: a decode failure after a key has verified is
+// returned as itself (ErrDecryptionFailed, a base64 error, ...).
 //
-// A missing licence key or fingerprint is the caller's own omission, is
-// decided entirely by their inputs and the file's public alg string, and
-// tells an attacker nothing about the file — so it is surfaced as itself
-// rather than buried, because "you forgot the decryption material" is far
-// more actionable than "invalid signature". Anything else means the bytes
-// are malformed or undecryptable, and after every key has already failed
-// there is nothing to distinguish that from a forgery.
+// A missing licence key or fingerprint, or an unsupported alg, is decided
+// entirely by the caller's inputs and the file's public alg string, tells
+// an attacker nothing, and is far more actionable than "invalid signature"
+// — so each is surfaced as itself. Anything else means the bytes are
+// malformed or undecryptable, and after every key has already failed there
+// is nothing to distinguish that from a forgery.
 func unverifiableFileError(err error) error {
-	if errors.Is(err, ErrLicenseKeyRequired) || errors.Is(err, ErrFingerprintRequired) {
+	if errors.Is(err, ErrLicenseKeyRequired) || errors.Is(err, ErrFingerprintRequired) ||
+		errors.Is(err, ErrUnsupportedAlgorithm) {
 		return err
 	}
 	return ErrInvalidSignature
