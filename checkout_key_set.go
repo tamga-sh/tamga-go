@@ -117,9 +117,12 @@ func unverifiedKeyID(plaintext []byte) string {
 //     the new public key. Do NOT report this to a user as tampering.
 //   - the kid it names is UnpublishedSigningKeyID →
 //     *UnknownSigningKeyError matching errors.Is(err,
-//     ErrSigningKeyNotPublished) instead. Refreshing will not help: the
-//     account that signed the file has published no Ed25519 key at all and
-//     an operator has to rotate one in.
+//     ErrSigningKeyNotPublished) instead. This is a pre-patch artifact: the
+//     account that signed the file had published no Ed25519 key at the
+//     time, under a server that has since started refusing to sign without
+//     one (ErrSigningKeyMissing). Refreshing the key set will not help —
+//     there is no key to fetch for that file — a fresh checkout of the
+//     file is the fix.
 //   - the file's alg is not a +v2 value → ErrUnsupportedAlgorithm, before
 //     any key is tried. Same error, same ordering, as Verify (D17).
 //   - a held key verified and decryption then failed → ErrDecryptionFailed.
