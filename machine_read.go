@@ -403,26 +403,33 @@ func (c *Client) ActivateMachineIdempotent(ctx context.Context, opts CreateMachi
 // Fast path first: a same-license conflict names the machine in
 // meta.machineId (see (*APIError).ConflictingMachineID), so one GET by id
 // replaces the paginated search. The search is the fallback for a pre-patch
-// server, for a conflict that carried no meta, and for the race where the
-// named row was deleted between the two calls — the GET answers 404, the
-// search then finds nothing, and the caller re-raises the 409, never the
-// 404. Any other GET failure (a 500, a transport error) is returned as the
-// lookup error, the same way a failed search is.
+// server, for a conflict that carried no meta, for the race where the named
+// row was deleted between the two calls — the GET answers 404, the search
+// then finds nothing, and the caller re-raises the 409, never the 404 — and
+// for a named row whose fingerprint does not match opts.Fingerprint. Any
+// other GET failure (a 500, a transport error) is returned as the lookup
+// error, the same way a failed search is.
 //
-// Only a same-license conflict carries meta, so an adopted machine is always
-// the caller's own seat and its fingerprint is not re-checked here; the
-// search keeps the license scoping FindMachineByFingerprint documents for
-// the same reason.
+// ⚠️ The fast path's fingerprint IS re-checked, unlike the fast path itself
+// might suggest. meta.machineId is server-named, not server-verified against
+// this call's fingerprint, so treating it as trustworthy without comparing
+// would let a mismatched id — a bug, a proxy replay, a future server change
+// — hand the caller a machine that never actually collided with this
+// fingerprint. FindMachineByFingerprint enforces the identical equality
+// check for exactly this reason; the fast path must not skip it just
+// because it took a shortcut to the row.
 func (c *Client) resolveTakenFingerprint(ctx context.Context, conflict error, opts CreateMachineOptions) (*Machine, bool, error) {
 	var apiErr *APIError
 	if errors.As(conflict, &apiErr) {
 		if id, ok := apiErr.ConflictingMachineID(); ok {
 			existing, err := c.GetMachine(ctx, id)
 			switch {
-			case err == nil:
+			case err == nil && existing.Attributes.Fingerprint == opts.Fingerprint:
 				return existing, true, nil
-			case errors.Is(err, ErrNotFound):
-				// Fall through to the search.
+			case err == nil, errors.Is(err, ErrNotFound):
+				// Either the named row's fingerprint doesn't match (fall
+				// through as if meta.machineId had been absent), or it's
+				// gone (fall through to the search).
 			default:
 				return nil, false, err
 			}

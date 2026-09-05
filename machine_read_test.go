@@ -543,3 +543,34 @@ func TestActivateMachineIdempotent_FallsBackToTheSearchWhenTheNamedMachineIsGone
 		t.Errorf("gets = %d, lists = %d; want the GET tried, then the search", calls.gets, calls.lists)
 	}
 }
+
+func TestActivateMachineIdempotent_FallsBackToTheSearchWhenTheNamedMachinesFingerprintMismatches(t *testing.T) {
+	// meta.machineId is server-named, not server-verified against this
+	// call's fingerprint: the GET succeeds but returns a row whose
+	// fingerprint doesn't match, so it must be treated as if meta.machineId
+	// had been absent and fall through to the license-scoped search — never
+	// adopted outright.
+	getBody := `{"data":` + machineJSONWithFingerprint("m-existing", "fp-different") + `}`
+	listBody := `{"data":[` + machineJSONWithFingerprint("m-existing", "fp-abc") +
+		`],"meta":{"page":{"number":1,"size":100,"total":1,"totalPages":1}}}`
+	c, closeFn, calls := idempotentActivationServerV2(t, sameLicenseConflictJSON, getBody, listBody, validMetaJSON)
+	defer closeFn()
+
+	machine, meta, err := c.ActivateMachineIdempotent(context.Background(),
+		CreateMachineOptions{Fingerprint: "fp-abc", LicenseID: "lic-1"}, nil)
+	if err != nil {
+		t.Fatalf("ActivateMachineIdempotent() error = %v", err)
+	}
+	if machine == nil || machine.ID != "m-existing" {
+		t.Fatalf("machine = %+v, want the machine the search found", machine)
+	}
+	if meta == nil || meta.Code != ValidationCodeValid {
+		t.Fatalf("meta = %+v", meta)
+	}
+	if calls.gets != 1 || calls.lists != 1 {
+		t.Errorf("gets = %d, lists = %d; want the mismatched GET rejected, then the search", calls.gets, calls.lists)
+	}
+	if calls.deletes != 0 {
+		t.Errorf("issued %d deletes", calls.deletes)
+	}
+}
