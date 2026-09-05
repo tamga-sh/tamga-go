@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.6](https://github.com/tamga-sh/tamga-go/compare/v1.2.5...v1.2.6) (2026-09-05)
+
+
+### Bug Fixes
+
+* **checkout:** reject a fast-path machine whose fingerprint doesn't match ([96b97fd](https://github.com/tamga-sh/tamga-go/commit/96b97fdfc2daa8c7f3cd9990c6cc81f161217518))
+* D16/D17/D18 hardening and the API-patch fallout (1.2.6) ([a0c33f8](https://github.com/tamga-sh/tamga-go/commit/a0c33f8bb0828d54df67ffca15e0aa9bffca00a0))
+* decode numeric error status, type the alg and decryption failures, and adopt the machine a 409 names ([0e35953](https://github.com/tamga-sh/tamga-go/commit/0e35953597adf0985e6f4d417f193ff35dcc39ee))
+
 ## [1.2.5](https://github.com/tamga-sh/tamga-go/compare/v1.2.4...v1.2.5) (2026-08-21)
 
 
