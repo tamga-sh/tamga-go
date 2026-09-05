@@ -12,8 +12,15 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"errors"
 	"fmt"
 )
+
+// ErrDecryptionFailed is returned by OpenAESGCM when the AEAD open fails —
+// a wrong key or a tampered ciphertext/tag, which AES-GCM deliberately does
+// not tell apart. Exported so the checkout verifiers can match it with
+// errors.Is; package tamga re-exports it as ErrDecryptionFailed.
+var ErrDecryptionFailed = errors.New("aes-256-gcm: decryption failed (wrong key or tampered ciphertext)")
 
 // OpenAESGCM decrypts ciphertextAndTag (ciphertext with the 16-byte AEAD
 // tag appended, as produced by the server's seal-in-place-append-tag) with
@@ -35,7 +42,7 @@ func OpenAESGCM(key [32]byte, nonce, ciphertextAndTag []byte) ([]byte, error) {
 	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertextAndTag, nil)
 	if err != nil {
-		return nil, fmt.Errorf("tamga: aes-256-gcm: decryption failed (wrong key or tampered ciphertext)")
+		return nil, fmt.Errorf("tamga: %w", ErrDecryptionFailed)
 	}
 	return plaintext, nil
 }

@@ -550,3 +550,62 @@ func TestMachineFileVerifyWithKeySet_AgreesWithVerifyOnTheHappyPath(t *testing.T
 		})
 	}
 }
+
+// TestLicenseFileVerifyWithKeySet_NoByteOfEncIsDecodedBeforeAHeldKeyVerifies
+// is contract test 20. The signature covers enc's STRING bytes, so a file
+// whose enc is not base64 at all can still carry a valid signature:
+//
+//   - signed by a HELD key: the key verifies first, and only then is enc
+//     decoded — so the error is the base64 failure, never ErrInvalidSignature.
+//   - signed by a key the set does NOT hold: nothing verifies, the failure
+//     path cannot read a kid, and the file fails closed as ErrInvalidSignature.
+func TestLicenseFileVerifyWithKeySet_NoByteOfEncIsDecodedBeforeAHeldKeyVerifies(t *testing.T) {
+	held := newRotatedKey(t, "")
+	stranger := newRotatedKey(t, "")
+	set := NewSigningKeySet([]SigningKey{held.resource})
+
+	garbageFile := func(signer rotatedKey) *LicenseFile {
+		enc := "!!!not-base64!!!"
+		sig := ed25519.Sign(signer.priv, []byte(enc))
+		return &LicenseFile{Alg: AlgBase64Ed25519, Enc: enc, Sig: base64.StdEncoding.EncodeToString(sig), Now: atEpoch()}
+	}
+
+	_, err := garbageFile(held).VerifyWithKeySet(set, "")
+	if err == nil {
+		t.Fatal("VerifyWithKeySet() accepted an undecodable enc")
+	}
+	if errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("error = %v: the held key verifies these bytes, so the rejection must come from the decode that follows", err)
+	}
+	if !strings.Contains(err.Error(), "base64") {
+		t.Errorf("error = %v, want the post-verification base64 failure", err)
+	}
+
+	_, err = garbageFile(stranger).VerifyWithKeySet(set, "")
+	if !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("error = %v, want ErrInvalidSignature: no key verified and the kid is unreadable", err)
+	}
+}
+
+func TestMachineFileVerifyWithKeySet_NoByteOfEncIsDecodedBeforeAHeldKeyVerifies(t *testing.T) {
+	enc := "!!!not-base64!!!"
+	pubAny, sig := signForScheme(t, SchemeEd25519Sign, enc)
+	pub, ok := pubAny.(ed25519.PublicKey)
+	if !ok {
+		t.Fatalf("signForScheme returned %T, want ed25519.PublicKey", pubAny)
+	}
+	pubB64 := base64.StdEncoding.EncodeToString(pub)
+	held := signingKeyResource(KeyID(pubB64), ed25519Algorithm, pubB64, nil)
+	file := &MachineFile{Alg: "base64+ed25519+v2", Enc: enc, Sig: base64.StdEncoding.EncodeToString(sig), Now: atEpoch()}
+
+	_, err := file.VerifyWithKeySet(SchemeEd25519Sign, NewSigningKeySet([]SigningKey{held}), "", "")
+	if err == nil || errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("error = %v, want the post-verification base64 failure, never ErrInvalidSignature", err)
+	}
+
+	stranger := newRotatedKey(t, "")
+	_, err = file.VerifyWithKeySet(SchemeEd25519Sign, NewSigningKeySet([]SigningKey{stranger.resource}), "", "")
+	if !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("error = %v, want ErrInvalidSignature", err)
+	}
+}

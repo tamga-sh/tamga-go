@@ -363,19 +363,26 @@ func (c *Client) FindMachineByFingerprint(ctx context.Context, licenseID, finger
 // refusal short-circuits with a synthesized meta and no machine, a
 // non-limit create error propagates as-is, and a successful create
 // followed by an overage verdict still rolls back.
+//
+// Since the API patch a same-license conflict names the existing machine in
+// meta.machineId; that is tried first with a single GetMachine call, and
+// FindMachineByFingerprint is the fallback for a conflict that carried no
+// meta (a cross-license conflict, or a pre-patch server). See
+// resolveTakenFingerprint.
 func (c *Client) ActivateMachineIdempotent(ctx context.Context, opts CreateMachineOptions, scope *Scope) (*Machine, *ValidationMeta, error) {
 	machine, meta, err := c.ActivateMachine(ctx, opts, scope)
 	if !errors.Is(err, ErrFingerprintTaken) {
 		return machine, meta, err
 	}
 
-	existing, found, lookupErr := c.FindMachineByFingerprint(ctx, opts.LicenseID, opts.Fingerprint)
+	existing, found, lookupErr := c.resolveTakenFingerprint(ctx, err, opts)
 	if lookupErr != nil {
 		return nil, nil, fmt.Errorf("tamga: re-activation lookup after %w failed: %w", err, lookupErr)
 	}
 	if !found {
 		// The fingerprint is taken on another license under a wider
-		// uniqueness strategy. Re-raise rather than resolve.
+		// uniqueness strategy, or the named row vanished between the two
+		// calls. Re-raise rather than resolve.
 		return nil, nil, err
 	}
 
@@ -387,4 +394,46 @@ func (c *Client) ActivateMachineIdempotent(ctx context.Context, opts CreateMachi
 		return existing, valMeta, fmt.Errorf("%w (code=%s)", ErrMachineOverLimit, valMeta.Code)
 	}
 	return existing, valMeta, nil
+}
+
+// resolveTakenFingerprint finds the machine a 409 FINGERPRINT_TAKEN refused
+// to duplicate, reporting found = false when nothing on this license holds
+// the fingerprint.
+//
+// Fast path first: a same-license conflict names the machine in
+// meta.machineId (see (*APIError).ConflictingMachineID), so one GET by id
+// replaces the paginated search. The search is the fallback for a pre-patch
+// server, for a conflict that carried no meta, for the race where the named
+// row was deleted between the two calls — the GET answers 404, the search
+// then finds nothing, and the caller re-raises the 409, never the 404 — and
+// for a named row whose fingerprint does not match opts.Fingerprint. Any
+// other GET failure (a 500, a transport error) is returned as the lookup
+// error, the same way a failed search is.
+//
+// ⚠️ The fast path's fingerprint IS re-checked, unlike the fast path itself
+// might suggest. meta.machineId is server-named, not server-verified against
+// this call's fingerprint, so treating it as trustworthy without comparing
+// would let a mismatched id — a bug, a proxy replay, a future server change
+// — hand the caller a machine that never actually collided with this
+// fingerprint. FindMachineByFingerprint enforces the identical equality
+// check for exactly this reason; the fast path must not skip it just
+// because it took a shortcut to the row.
+func (c *Client) resolveTakenFingerprint(ctx context.Context, conflict error, opts CreateMachineOptions) (*Machine, bool, error) {
+	var apiErr *APIError
+	if errors.As(conflict, &apiErr) {
+		if id, ok := apiErr.ConflictingMachineID(); ok {
+			existing, err := c.GetMachine(ctx, id)
+			switch {
+			case err == nil && existing.Attributes.Fingerprint == opts.Fingerprint:
+				return existing, true, nil
+			case err == nil, errors.Is(err, ErrNotFound):
+				// Either the named row's fingerprint doesn't match (fall
+				// through as if meta.machineId had been absent), or it's
+				// gone (fall through to the search).
+			default:
+				return nil, false, err
+			}
+		}
+	}
+	return c.FindMachineByFingerprint(ctx, opts.LicenseID, opts.Fingerprint)
 }

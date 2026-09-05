@@ -296,8 +296,89 @@ func TestLicenseFileVerify_RejectsTamperedCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseLicenseFile() error = %v", err)
 	}
-	if _, err := file.Verify(pub, licenseKey); err == nil {
-		t.Fatal("Verify() succeeded against a tampered AEAD tag, want an error (signature passed, decryption must still fail)")
+	if _, err := file.Verify(pub, licenseKey); !errors.Is(err, ErrDecryptionFailed) {
+		t.Fatalf("Verify() error = %v, want ErrDecryptionFailed (signature passed, decryption must fail as its own condition)", err)
+	}
+}
+
+// TestLicenseFileVerify_AlgGateRunsBeforeTheSignature pins D17 for both
+// license-file entry points. The key handed in does NOT match the signer,
+// so if the signature ran first every case would fail as ErrInvalidSignature
+// (single key) or ErrUnknownSigningKey (key set); the alg gate must reject
+// the file before any key is consulted, and say so as ErrUnsupportedAlgorithm.
+func TestLicenseFileVerify_AlgGateRunsBeforeTheSignature(t *testing.T) {
+	_, priv := testEd25519Keypair(t)
+	unrelatedPub, _ := testEd25519Keypair(t)
+	stale := NewSigningKeySet([]SigningKey{newRotatedKey(t, "").resource})
+
+	for _, alg := range []string{
+		"base64+ed25519",        // pre-v2
+		"aes-256-gcm+ed25519",   // pre-v2, encrypted
+		"base64+ed25519+v3",     // a future/unknown format
+		"base64+ed25519+v2junk", // trailing garbage
+		"xbase64+ed25519+v2",    // unknown encoding prefix
+		"",                      // absent
+	} {
+		t.Run(alg, func(t *testing.T) {
+			file, err := ParseLicenseFile(buildLicensePEM(t, representativeLicensePayloadJSON(), priv, nil, false))
+			if err != nil {
+				t.Fatalf("ParseLicenseFile() error = %v", err)
+			}
+			file.Alg = alg
+
+			_, err = file.Verify(unrelatedPub, "")
+			if !errors.Is(err, ErrUnsupportedAlgorithm) {
+				t.Errorf("Verify() error = %v, want ErrUnsupportedAlgorithm", err)
+			}
+			if errors.Is(err, ErrInvalidSignature) {
+				t.Errorf("Verify() rejected alg %q as ErrInvalidSignature; the gate ran after the signature", alg)
+			}
+
+			_, err = file.VerifyWithKeySet(stale, "")
+			if !errors.Is(err, ErrUnsupportedAlgorithm) {
+				t.Errorf("VerifyWithKeySet() error = %v, want ErrUnsupportedAlgorithm", err)
+			}
+			if errors.Is(err, ErrInvalidSignature) || errors.Is(err, ErrUnknownSigningKey) {
+				t.Errorf("VerifyWithKeySet() rejected alg %q as a key problem (%v); the gate must run before any key is tried", alg, err)
+			}
+		})
+	}
+}
+
+// TestLicenseFileVerify_WrongLicenseKeyIsDecryptionFailedNotForgery pins D16:
+// once the signature has verified, an AES-GCM failure can only mean the
+// wrong license key, and a caller must be able to tell that from a forgery
+// on both entry points.
+func TestLicenseFileVerify_WrongLicenseKeyIsDecryptionFailedNotForgery(t *testing.T) {
+	signer := newRotatedKey(t, "")
+	aesKey, err := internalcrypto.DeriveLicenseFileKey("the-real-license-key")
+	if err != nil {
+		t.Fatalf("DeriveLicenseFileKey() error = %v", err)
+	}
+	file, err := ParseLicenseFile(buildLicensePEM(t, keyedLicensePayloadJSON(signer.kid, 0), signer.priv, &aesKey, false))
+	if err != nil {
+		t.Fatalf("ParseLicenseFile() error = %v", err)
+	}
+	file.Now = atEpoch()
+	pub, err := base64.StdEncoding.DecodeString(signer.resource.Attributes.PublicKey)
+	if err != nil {
+		t.Fatalf("decode public key: %v", err)
+	}
+
+	_, err = file.Verify(ed25519.PublicKey(pub), "the-wrong-license-key")
+	if !errors.Is(err, ErrDecryptionFailed) {
+		t.Fatalf("Verify() error = %v, want ErrDecryptionFailed", err)
+	}
+	if errors.Is(err, ErrInvalidSignature) {
+		t.Fatal("a wrong license key read as a forgery")
+	}
+
+	_, err = file.VerifyWithKeySet(NewSigningKeySet([]SigningKey{signer.resource}), "the-wrong-license-key")
+	if !errors.Is(err, ErrDecryptionFailed) {
+		t.Fatalf("VerifyWithKeySet() error = %v, want ErrDecryptionFailed: the held key verified, so this is not a signature problem", err)
+	}
+	if errors.Is(err, ErrInvalidSignature) {
+		t.Fatal("VerifyWithKeySet() collapsed a decryption failure into ErrInvalidSignature")
 	}
 }
 

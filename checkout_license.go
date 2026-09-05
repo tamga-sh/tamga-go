@@ -54,6 +54,22 @@ const (
 	AlgAES256GCMEd25519 = "aes-256-gcm+ed25519+v2"
 )
 
+// validateLicenseFileAlg is the format gate every license-file verifying
+// entry point runs FIRST — before the signature is base64-decoded, before
+// any key is consulted (D17). Both entry points share it so a pre-v2 file
+// is refused the same way from each, and never as ErrInvalidSignature: a
+// v1 file's signature may well verify, and reporting it as a forgery sends
+// support to the wrong place.
+func validateLicenseFileAlg(alg string) error {
+	switch alg {
+	case AlgBase64Ed25519, AlgAES256GCMEd25519:
+		return nil
+	default:
+		return fmt.Errorf("%w: license file alg %q is not %q or %q (pre-v2 or unknown file)",
+			ErrUnsupportedAlgorithm, alg, AlgBase64Ed25519, AlgAES256GCMEd25519)
+	}
+}
+
 // clockSkewToleranceSeconds is how much clock skew Verify tolerates when
 // checking exp.
 //
@@ -238,7 +254,18 @@ type LicensePayload struct {
 // (checkout_key_set.go) is the rotation-aware equivalent and tells those
 // two apart; this method is the right call when you hold one key and know
 // it.
+//
+// The alg gate runs before all of it: an unrecognized alg is
+// ErrUnsupportedAlgorithm from here and from VerifyWithKeySet alike, never
+// ErrInvalidSignature. And a decryption failure after a good signature is
+// ErrDecryptionFailed — the wrong license key — not ErrInvalidSignature.
 func (f *LicenseFile) Verify(pub ed25519.PublicKey, licenseKey string) (*LicensePayload, error) {
+	// Step 0: the format gate, before any key or signature work. See
+	// validateLicenseFileAlg.
+	if err := validateLicenseFileAlg(f.Alg); err != nil {
+		return nil, err
+	}
+
 	sigBytes, err := base64.StdEncoding.DecodeString(f.Sig)
 	if err != nil {
 		return nil, fmt.Errorf("tamga: invalid base64 in license file signature: %w", err)
@@ -300,7 +327,8 @@ func (f *LicenseFile) decodePlaintext(licenseKey string) ([]byte, error) {
 		}
 		return plaintext, nil
 	default:
-		return nil, fmt.Errorf("tamga: unsupported license file algorithm %q", f.Alg)
+		// Unreachable behind validateLicenseFileAlg; kept as defense in depth.
+		return nil, fmt.Errorf("%w: license file alg %q", ErrUnsupportedAlgorithm, f.Alg)
 	}
 }
 

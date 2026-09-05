@@ -53,10 +53,16 @@ const ed25519Algorithm = "ed25519"
 // signs every file it issues with this one id.
 //
 // Recognising it is what separates "your key set is stale, refresh it" from
-// "the server that issued this file has published no signing key at all".
-// The first is fixed on the client, by fetching the key set; the second
-// cannot be fixed on the client at any speed and needs an operator to
-// rotate a key into the account. Verification surfaces the difference as
+// "this file was issued before the account published a signing key". The
+// first is fixed on the client, by fetching the key set. The second is a
+// PRE-PATCH condition: before the API patch account_signing_keys was
+// written only by a rotation, so an unrotated account signed with the id of
+// the empty string; the patched server publishes every account's key from
+// creation, backfills existing accounts at startup, and refuses check-out
+// with 422 SIGNING_KEY_MISSING (ErrSigningKeyMissing) rather than signing
+// with nothing. A file carrying this id therefore predates the patch, and a
+// fresh checkout — not a key-set refresh, and no longer an operator
+// rotation — resolves it. Verification surfaces the difference as
 // ErrSigningKeyNotPublished rather than ErrUnknownSigningKey — see
 // UnknownSigningKeyError.
 const UnpublishedSigningKeyID = "e3b0c44298fc1c14"
@@ -414,15 +420,17 @@ var (
 
 	// ErrSigningKeyNotPublished is the more specific outcome when the
 	// claimed `kid` is UnpublishedSigningKeyID: the account that signed the
-	// file has no Ed25519 public key at all, so it signed with the id of
-	// the empty string.
+	// file had no Ed25519 public key at the time, so it signed with the id
+	// of the empty string.
 	//
-	// Refreshing the key set will not fix this and retrying will not either
-	// — there is no key to fetch. An operator has to rotate one into the
-	// account server-side. It does NOT match ErrUnknownSigningKey, so a
-	// caller cannot accidentally report "your keys are stale" for a
-	// condition no client action can resolve.
-	ErrSigningKeyNotPublished = errors.New("tamga: this file names the empty-key id " + UnpublishedSigningKeyID + ": the account that signed it has published no Ed25519 signing key")
+	// Refreshing the key set will not fix this — there is no key to fetch
+	// for that file. It is a pre-patch artifact: the patched server
+	// publishes a key for every account from creation and refuses to sign
+	// without one (ErrSigningKeyMissing), so the remedy is a fresh checkout
+	// of the file. It does NOT match ErrUnknownSigningKey, so a caller
+	// cannot accidentally report "your keys are stale" for a condition a
+	// refresh cannot resolve.
+	ErrSigningKeyNotPublished = errors.New("tamga: this file names the empty-key id " + UnpublishedSigningKeyID + ": the account that signed it had published no Ed25519 signing key (pre-patch file; request a fresh checkout)")
 
 	// ErrNoUsableSigningKey is returned when the set holds no key that
 	// could verify this file even in principle — an empty set, or a
