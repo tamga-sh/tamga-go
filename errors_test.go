@@ -161,6 +161,30 @@ func TestAPIError_ConflictingMachineID(t *testing.T) {
 	}
 }
 
+func TestAPIError_MeterEntitlementID(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    *APIError
+		wantID string
+		wantOK bool
+	}{
+		{"meter cap hit", &APIError{HTTPStatus: 422, Err: Error{Code: "METER_LIMIT_EXCEEDED", Meta: map[string]any{"entitlement_id": "ent-1"}}}, "ent-1", true},
+		{"no meta", &APIError{HTTPStatus: 422, Err: Error{Code: "METER_LIMIT_EXCEEDED"}}, "", false},
+		{"empty id", &APIError{HTTPStatus: 422, Err: Error{Code: "METER_LIMIT_EXCEEDED", Meta: map[string]any{"entitlement_id": ""}}}, "", false},
+		{"non-string id", &APIError{HTTPStatus: 422, Err: Error{Code: "METER_LIMIT_EXCEEDED", Meta: map[string]any{"entitlement_id": 42}}}, "", false},
+		{"other code with meta", &APIError{HTTPStatus: 409, Err: Error{Code: "FINGERPRINT_TAKEN", Meta: map[string]any{"entitlement_id": "ent-1"}}}, "", false},
+		{"nil receiver", nil, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			id, ok := tc.err.MeterEntitlementID()
+			if id != tc.wantID || ok != tc.wantOK {
+				t.Errorf("MeterEntitlementID() = (%q, %v), want (%q, %v)", id, ok, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestSentinels_SigningAndSecretKeyMissingMatchByCode(t *testing.T) {
 	for code, sentinel := range map[string]*APIError{
 		"SIGNING_KEY_MISSING": ErrSigningKeyMissing,
@@ -173,6 +197,16 @@ func TestSentinels_SigningAndSecretKeyMissingMatchByCode(t *testing.T) {
 		if sentinel.HTTPStatus != 422 {
 			t.Errorf("%s sentinel HTTPStatus = %d, want 422", code, sentinel.HTTPStatus)
 		}
+	}
+}
+
+func TestErrMeterLimitExceeded_MatchesByCode(t *testing.T) {
+	got := newAPIErrorFromResponse(422, ErrorResponse{Errors: []Error{{Code: "METER_LIMIT_EXCEEDED", Status: "422", Detail: "meter cap exceeded"}}})
+	if !errors.Is(got, ErrMeterLimitExceeded) {
+		t.Error("errors.Is(got, ErrMeterLimitExceeded) = false")
+	}
+	if ErrMeterLimitExceeded.HTTPStatus != 422 {
+		t.Errorf("ErrMeterLimitExceeded.HTTPStatus = %d, want 422", ErrMeterLimitExceeded.HTTPStatus)
 	}
 }
 

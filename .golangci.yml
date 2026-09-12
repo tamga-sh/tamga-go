@@ -29,9 +29,9 @@ linters:
       excludes:
         # G115 (int conversion overflow) is noisy on JSON:API numeric
         # attributes coming from documented-range server fields (cores,
-        # memory, disk, max_uses); revisit narrowly if real findings show
-        # up once implementation lands, rather than disabling class-wide
-        # here without evidence.
+        # memory, disk, entitlement max_value/current_value); revisit
+        # narrowly if real findings show up once implementation lands,
+        # rather than disabling class-wide here without evidence.
         - G115
   exclusions:
     generated: lax

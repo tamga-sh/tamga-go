@@ -20,7 +20,7 @@ const representativePolicyJSON = `{
 		"machine_uniqueness_strategy":"UNIQUE_PER_LICENSE",
 		"expiration_strategy":"RESTRICT_ACCESS","expiration_basis":"FROM_CREATION",
 		"renewal_basis":"FROM_EXPIRY","authentication_strategy":"LICENSE",
-		"overage_strategy":"DENY_ACCESS","max_machines":5,"max_cores":null,"max_uses":null,
+		"overage_strategy":"DENY_ACCESS","max_machines":5,"max_cores":null,
 		"max_processes":10,"max_users":null,"metadata":{},
 		"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"
 	}

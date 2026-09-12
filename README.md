@@ -563,7 +563,7 @@ Every claim below is implemented at the cited location.
   now genuinely enforced: entitlements takes entitlement **codes** (case-insensitive,
   de-duplicated, satisfied by direct or policy-inherited rows; an empty slice asserts nothing),
   and fingerprint matches any machine on the license regardless of heartbeat status.
-- **5 of the 24 `ValidationCode` values are unreachable against the patched server.** Each
+- **5 of the 23 `ValidationCode` values are unreachable against the patched server.** Each
   constant in `validation.go` is marked reachable or not; do not branch on a value that cannot
   come back today. `ENTITLEMENTS_MISSING` and `FINGERPRINT_SCOPE_MISMATCH` are reachable, and
   since the API patch so are `HEARTBEAT_NOT_STARTED` / `HEARTBEAT_DEAD` (emitted by the
@@ -588,6 +588,38 @@ Every claim below is implemented at the cited location.
   through its policy. It is only present on the license-scoped list route, hence `*bool` — `nil`
   means "the server did not say", not `false`. An inherited entitlement cannot be detached, and
   `GetEntitlement` returns `404` for it, so list-then-get-each is not a valid pattern here.
+  Attaching an already-inherited entitlement directly is refused with `422
+  ENTITLEMENT_ALREADY_INHERITED` **only for `kind: "flag"`** — a `kind: "meter"` entitlement can
+  be attached directly even when already inherited via policy, because direct attachment is what
+  creates the per-license counter row (`MaxValue`/`CurrentValue`) in the first place.
+- **`Entitlement.Attributes.Kind`** (`"flag"` or `"meter"`) is always present, on every response
+  shape — a required field, never a pointer. `MaxValue`/`CurrentValue` are meaningful only for
+  `kind: "meter"` and, like `Inherited`, are only present on the license-scoped list route
+  (`*int32`; `nil` means the server didn't say, not zero/unlimited). `MaxValue` is the effective
+  cap — `nil` means unlimited, the same convention every other `max_*` field uses. `CurrentValue`
+  is the running count and is `0` (not `nil`) once present but never incremented — `0` can also
+  mean "only inherited via policy, never directly attached", since only a direct attachment
+  carries a counter at all; check `Inherited` to tell the two apart. Track usage with
+  `IncrementEntitlementUsage`/`DecrementEntitlementUsage`/`ResetEntitlementUsage` — mirroring
+  `PingHeartbeat`/`ResetHeartbeat`'s shape one path segment deeper
+  (`.../entitlements/{id}/actions/{increment,decrement,reset}`), each returning the full
+  `Entitlement` so the caller sees the fresh values without a second round trip. Both increment
+  and decrement default to `1` and clamp to a minimum of `1` server-side; decrement floors at
+  `0`. All three require the entitlement to be **directly** attached to the license (404 if only
+  policy-inherited), and increment/decrement fail with `ErrMeterLimitExceeded` (`422
+  METER_LIMIT_EXCEEDED`) once `current_value + increment` would exceed `max_value` — read
+  `(*APIError).MeterEntitlementID` to learn which entitlement hit its cap:
+
+  ```go
+  three := int32(3)
+  ent, err := client.IncrementEntitlementUsage(ctx, licenseID, entitlementID, &three)
+  if errors.Is(err, tamga.ErrMeterLimitExceeded) {
+      var apiErr *tamga.APIError
+      errors.As(err, &apiErr)
+      id, _ := apiErr.MeterEntitlementID()
+      log.Printf("entitlement %s hit its meter cap", id)
+  }
+  ```
 - **`QuickValidate` does not always record the validation.** The server skips the
   `last_validated_at` write whenever the request carries an `Origin` header, and the response is
   byte-identical either way. This SDK never sets `Origin`, but a proxy or service mesh can — and

@@ -20,11 +20,55 @@ type Entitlement struct {
 	Attributes EntitlementAttributes `json:"attributes"`
 }
 
+// EntitlementKind distinguishes a boolean grant ("flag") from a named,
+// per-license counter ("meter") — see EntitlementAttributes' doc comment.
+// It is a plain string type rather than a closed Go enum, mirroring
+// ValidationCode (validation.go) for the same reason: decoding an unknown
+// value into a string never fails, so this SDK never hard-errors against a
+// kind the server adds in the future.
+//
+// Unlike Inherited/MaxValue/CurrentValue below, Kind is always present on
+// every response shape (account-, license-, policy-, and release-scoped
+// alike) — it is a plain required field, never a pointer/omitted addition.
+type EntitlementKind string
+
+const (
+	// EntitlementKindFlag is a boolean grant — the only kind that existed
+	// before named metering. MaxValue/CurrentValue are present but not
+	// enforced for it.
+	EntitlementKindFlag EntitlementKind = "flag"
+	// EntitlementKindMeter is a named, per-license counter with an
+	// independent cap, tracked via IncrementEntitlementUsage/
+	// DecrementEntitlementUsage/ResetEntitlementUsage. Fixed at creation —
+	// there is no update path that turns one kind into the other.
+	EntitlementKindMeter EntitlementKind = "meter"
+)
+
 // EntitlementAttributes is the attribute bag of an Entitlement resource.
 //
 // Code is the stable, developer-facing identifier — HasEntitlement matches
 // on this field. Name is a display label only and may collide or change
 // independently of Code; never match on it.
+//
+// Kind is always present — see EntitlementKind's doc comment.
+//
+// MaxValue and CurrentValue are meaningful only for Kind ==
+// EntitlementKindMeter — present but not enforced for a flag. Like
+// Inherited below, both are only present on the license-scoped list route
+// (ListEntitlements/GetEntitlement); account-, policy-, and release-scoped
+// responses omit them, which is why they are pointers: nil means "the
+// server did not say", not "zero" or "unlimited".
+//
+//   - MaxValue is the effective cap — the license's own override if it has
+//     one, else the policy's default, else nil for unlimited, the same
+//     "nullable means unlimited" convention every other max_* field in
+//     this package already uses.
+//   - CurrentValue is the running count, 0 (not nil) when present but
+//     never incremented. 0 does not necessarily mean "never used" — it
+//     also means "only inherited from the license's policy, never
+//     directly attached to this license", because only a direct
+//     license_entitlements row carries a counter at all. Check Inherited
+//     to tell the two apart.
 //
 // Inherited reports whether the license holds this entitlement through
 // its policy rather than by a direct attachment. It is only present on
@@ -33,18 +77,28 @@ type Entitlement struct {
 // is why it is a *bool: nil means "the server did not say", not false.
 //
 // It gates three things. An inherited entitlement cannot be detached from
-// the license (403 POLICY_ENTITLEMENT); attaching it directly on top is
-// refused with 422 ENTITLEMENT_ALREADY_INHERITED; and GetEntitlement
-// returns 404 for it — see that method's doc comment.
+// the license (403 POLICY_ENTITLEMENT). Attaching it directly on top is
+// refused with 422 ENTITLEMENT_ALREADY_INHERITED — but only for Kind ==
+// EntitlementKindFlag: a kind: "meter" entitlement CAN be attached
+// directly even when already inherited via policy, because direct
+// attachment is what creates the per-license counter row (MaxValue/
+// CurrentValue) in the first place, not a redundant grant the way a
+// second flag attachment would be. And GetEntitlement returns 404 for an
+// inherited entitlement regardless of kind — see that method's doc
+// comment.
 type EntitlementAttributes struct {
-	// Inherited leads the struct only to satisfy govet's fieldalignment
-	// check; field order here carries no wire meaning.
-	Inherited *bool           `json:"inherited,omitempty"`
-	Name      string          `json:"name"`
-	Code      string          `json:"code"`
-	Created   string          `json:"created"`
-	Updated   string          `json:"updated"`
-	Metadata  json.RawMessage `json:"metadata"`
+	// Inherited, MaxValue, and CurrentValue lead the struct only to
+	// satisfy govet's fieldalignment check; field order here carries no
+	// wire meaning.
+	Inherited    *bool           `json:"inherited,omitempty"`
+	MaxValue     *int32          `json:"max_value,omitempty"`
+	CurrentValue *int32          `json:"current_value,omitempty"`
+	Name         string          `json:"name"`
+	Code         string          `json:"code"`
+	Kind         EntitlementKind `json:"kind"`
+	Created      string          `json:"created"`
+	Updated      string          `json:"updated"`
+	Metadata     json.RawMessage `json:"metadata"`
 }
 
 // ListOptions is the shared keyset-pagination request shape used by
@@ -241,4 +295,80 @@ func (c *Client) InvalidateEntitlementCache(licenseID string) {
 	cache.mu.Lock()
 	delete(cache.entries, licenseID)
 	cache.mu.Unlock()
+}
+
+// IncrementEntitlementUsage increments a kind: "meter" entitlement's
+// CurrentValue on licenseID by increment, or by 1 (the server's own
+// default) when increment is nil.
+// POST /v1/accounts/{account_id}/licenses/{license_id}/entitlements/{entitlement_id}/actions/increment.
+//
+// Mirrors PingHeartbeat's shape one path segment deeper: no body is sent
+// unless increment is set, and the response decodes back into the full
+// Entitlement resource so the caller sees the fresh CurrentValue (and
+// MaxValue) without a second round trip.
+//
+// increment is clamped to a minimum of 1 server-side — a zero or negative
+// value is raised to 1, not rejected, the same rule the retired global
+// counter's increment-usage action used.
+//
+// ⚠️ Requires the entitlement to be attached DIRECTLY to this license. One
+// only inherited via the license's policy has no license_entitlements row
+// to increment, and this call answers 404 NOT_FOUND
+// (errors.Is(err, ErrNotFound)) until it is attached directly — see
+// EntitlementAttributes' doc comment for the kind: "meter" exception that
+// makes direct attachment possible even when the entitlement is already
+// inherited.
+//
+// Fails with an error matching ErrMeterLimitExceeded (via errors.Is) when
+// current_value + increment would exceed max_value. Read
+// (*APIError).MeterEntitlementID to learn which entitlement hit its cap
+// without re-parsing the request.
+func (c *Client) IncrementEntitlementUsage(ctx context.Context, licenseID, entitlementID string, increment *int32) (*Entitlement, error) {
+	path := fmt.Sprintf("/licenses/%s/entitlements/%s/actions/increment", escapePathSegment(licenseID), escapePathSegment(entitlementID))
+	var body any
+	if increment != nil {
+		body = map[string]any{"increment": *increment}
+	}
+	entitlement, err := decodeJSONAPI[Entitlement](ctx, c, "POST", path, body)
+	if err != nil {
+		return nil, err
+	}
+	return &entitlement, nil
+}
+
+// DecrementEntitlementUsage decrements a kind: "meter" entitlement's
+// CurrentValue on licenseID by decrement, or by 1 (the server's own
+// default) when decrement is nil.
+// POST /v1/accounts/{account_id}/licenses/{license_id}/entitlements/{entitlement_id}/actions/decrement.
+// Same shape as IncrementEntitlementUsage — see its doc comment for the
+// direct-attachment requirement.
+//
+// decrement is clamped to a minimum of 1 server-side, the same as
+// increment. CurrentValue floors at 0 — it never goes negative, however
+// large decrement is.
+func (c *Client) DecrementEntitlementUsage(ctx context.Context, licenseID, entitlementID string, decrement *int32) (*Entitlement, error) {
+	path := fmt.Sprintf("/licenses/%s/entitlements/%s/actions/decrement", escapePathSegment(licenseID), escapePathSegment(entitlementID))
+	var body any
+	if decrement != nil {
+		body = map[string]any{"decrement": *decrement}
+	}
+	entitlement, err := decodeJSONAPI[Entitlement](ctx, c, "POST", path, body)
+	if err != nil {
+		return nil, err
+	}
+	return &entitlement, nil
+}
+
+// ResetEntitlementUsage rewinds a kind: "meter" entitlement's CurrentValue
+// on licenseID back to 0.
+// POST /v1/accounts/{account_id}/licenses/{license_id}/entitlements/{entitlement_id}/actions/reset,
+// no body. Same direct-attachment requirement as IncrementEntitlementUsage
+// — see its doc comment.
+func (c *Client) ResetEntitlementUsage(ctx context.Context, licenseID, entitlementID string) (*Entitlement, error) {
+	path := fmt.Sprintf("/licenses/%s/entitlements/%s/actions/reset", escapePathSegment(licenseID), escapePathSegment(entitlementID))
+	entitlement, err := decodeJSONAPI[Entitlement](ctx, c, "POST", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &entitlement, nil
 }

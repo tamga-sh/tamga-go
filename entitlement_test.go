@@ -2,7 +2,10 @@ package tamga
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -230,6 +233,230 @@ func TestHasEntitlement_ConcurrentAccessIsRaceFree(t *testing.T) {
 
 func sprintfEnt(id, name, code string) string {
 	return fmt.Sprintf(representativeEntitlementJSONTmpl, id, name, code)
+}
+
+// Kind is always present, on every response shape — never a pointer or an
+// omitted addition, unlike Inherited/MaxValue/CurrentValue.
+func TestListEntitlements_DecodesKind(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[` +
+			`{"id":"ent-1","type":"entitlements","attributes":{"name":"Pro","code":"pro","kind":"flag",` +
+			`"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}},` +
+			`{"id":"ent-2","type":"entitlements","attributes":{"name":"Requests","code":"requests","kind":"meter",` +
+			`"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}]}`))
+	})
+	defer closeFn()
+
+	page, err := c.ListEntitlements(context.Background(), "lic-id", ListOptions{})
+	if err != nil {
+		t.Fatalf("ListEntitlements() error = %v", err)
+	}
+	if page.Items[0].Attributes.Kind != EntitlementKindFlag {
+		t.Errorf("ent-1 Kind = %q, want %q", page.Items[0].Attributes.Kind, EntitlementKindFlag)
+	}
+	if page.Items[1].Attributes.Kind != EntitlementKindMeter {
+		t.Errorf("ent-2 Kind = %q, want %q", page.Items[1].Attributes.Kind, EntitlementKindMeter)
+	}
+}
+
+// An unrecognized kind value must decode cleanly, matching ValidationCode's
+// forward-compatibility rule (EntitlementKind is a plain string type, not a
+// closed Go enum).
+func TestEntitlementKind_UnknownValuePassthrough(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":` +
+			`{"id":"ent-1","type":"entitlements","attributes":{"name":"Future","code":"future","kind":"SOME_FUTURE_KIND",` +
+			`"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}}`))
+	})
+	defer closeFn()
+
+	entitlement, err := c.GetEntitlement(context.Background(), "lic-id", "ent-1")
+	if err != nil {
+		t.Fatalf("GetEntitlement() error = %v", err)
+	}
+	if entitlement.Attributes.Kind != EntitlementKind("SOME_FUTURE_KIND") {
+		t.Errorf("Kind = %q, want SOME_FUTURE_KIND", entitlement.Attributes.Kind)
+	}
+}
+
+// MaxValue/CurrentValue follow Inherited's own "present only on the
+// license-scoped route" pointer convention: nil means the server didn't
+// say, not zero/unlimited.
+func TestListEntitlements_DecodesMeterValues(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":[` +
+			`{"id":"ent-1","type":"entitlements","attributes":{"name":"Requests","code":"requests","kind":"meter",` +
+			`"inherited":false,"max_value":1000,"current_value":650,` +
+			`"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}},` +
+			`{"id":"ent-2","type":"entitlements","attributes":{"name":"Exports","code":"exports","kind":"meter",` +
+			`"inherited":false,"max_value":null,"current_value":0,` +
+			`"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}]}`))
+	})
+	defer closeFn()
+
+	page, err := c.ListEntitlements(context.Background(), "lic-id", ListOptions{})
+	if err != nil {
+		t.Fatalf("ListEntitlements() error = %v", err)
+	}
+	ent1 := page.Items[0].Attributes
+	if ent1.MaxValue == nil || *ent1.MaxValue != 1000 {
+		t.Errorf("ent-1 MaxValue = %v, want 1000", ent1.MaxValue)
+	}
+	if ent1.CurrentValue == nil || *ent1.CurrentValue != 650 {
+		t.Errorf("ent-1 CurrentValue = %v, want 650", ent1.CurrentValue)
+	}
+	ent2 := page.Items[1].Attributes
+	if ent2.MaxValue != nil {
+		t.Errorf("ent-2 MaxValue = %v, want nil (unlimited)", *ent2.MaxValue)
+	}
+	if ent2.CurrentValue == nil || *ent2.CurrentValue != 0 {
+		t.Errorf("ent-2 CurrentValue = %v, want 0 (present, never incremented)", ent2.CurrentValue)
+	}
+}
+
+func TestGetEntitlement_AbsentMeterValuesAreNilNotZero(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":` + sprintfEnt("ent-1", "Pro Features", "pro") + `}`))
+	})
+	defer closeFn()
+
+	entitlement, err := c.GetEntitlement(context.Background(), "lic-id", "ent-1")
+	if err != nil {
+		t.Fatalf("GetEntitlement() error = %v", err)
+	}
+	if entitlement.Attributes.MaxValue != nil {
+		t.Errorf("MaxValue = %v, want nil when the server omits the field", *entitlement.Attributes.MaxValue)
+	}
+	if entitlement.Attributes.CurrentValue != nil {
+		t.Errorf("CurrentValue = %v, want nil when the server omits the field", *entitlement.Attributes.CurrentValue)
+	}
+}
+
+func TestIncrementEntitlementUsage_DefaultsAndExplicitIncrement(t *testing.T) {
+	var gotBody map[string]any
+	var gotPath string
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":{"id":"ent-1","type":"entitlements","attributes":{"name":"Requests","code":"requests","kind":"meter","inherited":false,"max_value":1000,"current_value":4,"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}}`))
+	})
+	defer closeFn()
+
+	entitlement, err := c.IncrementEntitlementUsage(context.Background(), "lic-id", "ent-1", nil)
+	if err != nil {
+		t.Fatalf("IncrementEntitlementUsage() error = %v", err)
+	}
+	if !strings.HasSuffix(gotPath, "/licenses/lic-id/entitlements/ent-1/actions/increment") {
+		t.Errorf("path = %s", gotPath)
+	}
+	if gotBody != nil {
+		t.Errorf("body = %v, want no body when increment is nil", gotBody)
+	}
+	if entitlement.Attributes.CurrentValue == nil || *entitlement.Attributes.CurrentValue != 4 {
+		t.Errorf("CurrentValue = %v, want 4", entitlement.Attributes.CurrentValue)
+	}
+
+	three := int32(3)
+	if _, err := c.IncrementEntitlementUsage(context.Background(), "lic-id", "ent-1", &three); err != nil {
+		t.Fatalf("IncrementEntitlementUsage() error = %v", err)
+	}
+	if got, ok := gotBody["increment"].(float64); !ok || int32(got) != 3 {
+		t.Errorf("body[increment] = %v, want 3", gotBody["increment"])
+	}
+}
+
+func TestDecrementEntitlementUsage_SendsDecrementBody(t *testing.T) {
+	var gotBody map[string]any
+	var gotPath string
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":{"id":"ent-1","type":"entitlements","attributes":{"name":"Requests","code":"requests","kind":"meter","inherited":false,"max_value":1000,"current_value":0,"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}}`))
+	})
+	defer closeFn()
+
+	two := int32(2)
+	entitlement, err := c.DecrementEntitlementUsage(context.Background(), "lic-id", "ent-1", &two)
+	if err != nil {
+		t.Fatalf("DecrementEntitlementUsage() error = %v", err)
+	}
+	if !strings.HasSuffix(gotPath, "/licenses/lic-id/entitlements/ent-1/actions/decrement") {
+		t.Errorf("path = %s", gotPath)
+	}
+	if got, ok := gotBody["decrement"].(float64); !ok || int32(got) != 2 {
+		t.Errorf("body[decrement] = %v, want 2", gotBody["decrement"])
+	}
+	if entitlement.Attributes.CurrentValue == nil || *entitlement.Attributes.CurrentValue != 0 {
+		t.Errorf("CurrentValue = %v, want 0 (floored)", entitlement.Attributes.CurrentValue)
+	}
+}
+
+func TestResetEntitlementUsage_NoBodySentAndCurrentValueZeroed(t *testing.T) {
+	var gotBody []byte
+	var gotPath string
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		_, _ = w.Write([]byte(`{"data":{"id":"ent-1","type":"entitlements","attributes":{"name":"Requests","code":"requests","kind":"meter","inherited":false,"max_value":1000,"current_value":0,"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"}}}`))
+	})
+	defer closeFn()
+
+	entitlement, err := c.ResetEntitlementUsage(context.Background(), "lic-id", "ent-1")
+	if err != nil {
+		t.Fatalf("ResetEntitlementUsage() error = %v", err)
+	}
+	if !strings.HasSuffix(gotPath, "/licenses/lic-id/entitlements/ent-1/actions/reset") {
+		t.Errorf("path = %s", gotPath)
+	}
+	if len(gotBody) != 0 {
+		t.Errorf("body = %q, want empty", gotBody)
+	}
+	if entitlement.Attributes.CurrentValue == nil || *entitlement.Attributes.CurrentValue != 0 {
+		t.Errorf("CurrentValue = %v, want 0", entitlement.Attributes.CurrentValue)
+	}
+}
+
+func TestIncrementEntitlementUsage_MeterLimitExceeded(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"errors":[{"status":"422","code":"METER_LIMIT_EXCEEDED","title":"Unprocessable Entity","detail":"meter cap exceeded","meta":{"entitlement_id":"ent-1"}}]}`))
+	})
+	defer closeFn()
+
+	_, err := c.IncrementEntitlementUsage(context.Background(), "lic-id", "ent-1", nil)
+	if !errors.Is(err, ErrMeterLimitExceeded) {
+		t.Fatalf("errors.Is(err, ErrMeterLimitExceeded) = false, err = %v", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("errors.As() = false")
+	}
+	id, ok := apiErr.MeterEntitlementID()
+	if !ok || id != "ent-1" {
+		t.Errorf("MeterEntitlementID() = (%q, %v), want (\"ent-1\", true)", id, ok)
+	}
+}
+
+func TestIncrementEntitlementUsage_NotFoundWhenOnlyInherited(t *testing.T) {
+	c, closeFn := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.api+json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found","detail":"no direct attachment"}]}`))
+	})
+	defer closeFn()
+
+	_, err := c.IncrementEntitlementUsage(context.Background(), "lic-id", "ent-1", nil)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("errors.Is(err, ErrNotFound) = false, err = %v", err)
+	}
 }
 
 // ExampleClient_HasEntitlement demonstrates checking whether a license has
