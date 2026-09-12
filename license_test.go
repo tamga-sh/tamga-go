@@ -25,8 +25,8 @@ const representativeLicenseJSON = `{
 	"id":"lic-id","type":"licenses",
 	"attributes":{
 		"name":"Acme Corp","key":"lic-abc123","status":"ACTIVE","expiry":null,
-		"suspended":false,"protected":false,"uses":0,"scheme":null,"encrypted":false,
-		"strict":false,"floating":false,"max_machines":null,"max_uses":null,"max_users":null,
+		"suspended":false,"protected":false,"scheme":null,"encrypted":false,
+		"strict":false,"floating":false,"max_machines":null,"max_users":null,
 		"last_validated_at":null,"last_check_in_at":null,"last_check_out_at":null,
 		"machines_count":0,"metadata":{},"created":"2026-01-01T00:00:00Z","updated":"2026-01-01T00:00:00Z"
 	}
@@ -198,7 +198,7 @@ func TestCheckIn_UpdatesLastCheckInAt(t *testing.T) {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/vnd.api+json")
-		_, _ = w.Write([]byte(`{"data":{"id":"lic-id","type":"licenses","attributes":{"status":"ACTIVE","uses":0,"encrypted":false,"strict":false,"floating":false,"machines_count":0,"metadata":{},"last_check_in_at":"2026-02-01T00:00:00Z","created":"2026-01-01T00:00:00Z","updated":"2026-02-01T00:00:00Z"}}}`))
+		_, _ = w.Write([]byte(`{"data":{"id":"lic-id","type":"licenses","attributes":{"status":"ACTIVE","encrypted":false,"strict":false,"floating":false,"machines_count":0,"metadata":{},"last_check_in_at":"2026-02-01T00:00:00Z","created":"2026-01-01T00:00:00Z","updated":"2026-02-01T00:00:00Z"}}}`))
 	})
 	defer closeFn()
 

@@ -34,13 +34,11 @@ type LicenseAttributes struct {
 	LastValidatedAt *string         `json:"last_validated_at"`
 	Scheme          *string         `json:"scheme"`
 	MaxUsers        *int32          `json:"max_users"`
-	MaxUses         *int32          `json:"max_uses"`
 	Updated         string          `json:"updated"`
 	Created         string          `json:"created"`
 	Status          string          `json:"status"`
 	Metadata        json.RawMessage `json:"metadata"`
 	MachinesCount   int32           `json:"machines_count"`
-	Uses            int32           `json:"uses"`
 	Protected       bool            `json:"protected"`
 	Floating        bool            `json:"floating"`
 	Strict          bool            `json:"strict"`

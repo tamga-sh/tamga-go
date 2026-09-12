@@ -143,6 +143,27 @@ func (e *APIError) As(target any) bool {
 	return true
 }
 
+// MeterEntitlementID returns the id of the entitlement whose meter cap a
+// 422 METER_LIMIT_EXCEEDED refused, and true, when the server supplied it
+// in meta.entitlement_id — the same pattern ConflictingMachineID uses
+// below for FINGERPRINT_TAKEN's meta.machineId.
+//
+// Raised by IncrementEntitlementUsage/DecrementEntitlementUsage
+// (entitlement.go) when current_value + increment would exceed a kind:
+// "meter" entitlement's max_value; lets a caller juggling several meters
+// on one license tell which one hit its cap without re-parsing the
+// request.
+func (e *APIError) MeterEntitlementID() (string, bool) {
+	if e == nil || e.Err.Code != ErrMeterLimitExceeded.Err.Code {
+		return "", false
+	}
+	id, ok := e.Err.Meta["entitlement_id"].(string)
+	if !ok || id == "" {
+		return "", false
+	}
+	return id, true
+}
+
 // ConflictingMachineID returns the id of the machine that already holds the
 // fingerprint a 409 FINGERPRINT_TAKEN refused, and true, when the server
 // supplied it in meta.machineId.
@@ -239,6 +260,20 @@ var (
 	ErrDiskLimitExceeded    = &APIError{HTTPStatus: 422, Err: Error{Code: "DISK_LIMIT_EXCEEDED"}}
 	ErrTooManyProcesses     = &APIError{HTTPStatus: 422, Err: Error{Code: "TOO_MANY_PROCESSES"}}
 )
+
+// ErrMeterLimitExceeded (HTTP 422, Err.Code "METER_LIMIT_EXCEEDED") is
+// raised by IncrementEntitlementUsage/DecrementEntitlementUsage
+// (entitlement.go) when a kind: "meter" entitlement's current_value plus
+// the requested increment would exceed its max_value.
+//
+// It replaces the retired global usage counter's TOO_MANY_USES
+// ValidationCode (see validation.go) for the new per-entitlement meters —
+// but note it is a different wire vocabulary entirely, an *APIError from
+// the increment/decrement action itself, never a ValidationCode from a
+// validate call, the same MACHINE_LIMIT_EXCEEDED-vs-TOO_MANY_MACHINES
+// split documented above for machines. Carries meta.entitlement_id —
+// read it with (*APIError).MeterEntitlementID rather than by key.
+var ErrMeterLimitExceeded = &APIError{HTTPStatus: 422, Err: Error{Code: "METER_LIMIT_EXCEEDED"}}
 
 // License-key authentication sentinels (HTTP 401). These are refusals at
 // the front door: the credential was recognized, the license row was

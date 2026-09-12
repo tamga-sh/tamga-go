@@ -16,14 +16,14 @@ func allKnownValidationCodes() []ValidationCode {
 		ValidationCodePolicyScopeMismatch, ValidationCodeUserScopeMismatch,
 		ValidationCodeFingerprintScopeMismatch, ValidationCodeComponentsScopeMismatch,
 		ValidationCodeChecksumScopeMismatch, ValidationCodeVersionScopeMismatch,
-		ValidationCodeEnvironmentScopeMismatch, ValidationCodeTooManyUses,
+		ValidationCodeEnvironmentScopeMismatch,
 	}
 }
 
-func TestValidationCode_JSONRoundTripAll24Values(t *testing.T) {
+func TestValidationCode_JSONRoundTripAll23Values(t *testing.T) {
 	codes := allKnownValidationCodes()
-	if len(codes) != 24 {
-		t.Fatalf("len(codes) = %d, want 24", len(codes))
+	if len(codes) != 23 {
+		t.Fatalf("len(codes) = %d, want 23", len(codes))
 	}
 	for _, code := range codes {
 		encoded, err := json.Marshal(code)

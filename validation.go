@@ -10,7 +10,7 @@ import "time"
 // — callers that only recognize known constants should fall back to a
 // default case on switch.
 //
-// Only 19 of the 24 values below are reachable against the patched server;
+// Only 18 of the 23 values below are reachable against the patched server;
 // the rest are declared for schema completeness and forward-compatibility.
 // Each constant below is marked reachable (✅) or not (⛔) as of the server
 // behavior documented in the Tamga API protocol specification §2 — do not
@@ -22,7 +22,11 @@ import "time"
 // PRODUCT_SCOPE_MISMATCH, POLICY_SCOPE_MISMATCH, USER_SCOPE_MISMATCH,
 // ENVIRONMENT_SCOPE_MISMATCH, TOO_MANY_MACHINES, TOO_MANY_CORES,
 // TOO_MUCH_MEMORY, TOO_MUCH_DISK, TOO_MANY_PROCESSES, TOO_MANY_USERS,
-// TOO_MANY_USES, then VALID.
+// then VALID. The retired global usage counter's TOO_MANY_USES no longer
+// exists in this enum at all — entitlement meters (entitlement.go) replace
+// it with a per-entitlement 422 METER_LIMIT_EXCEEDED *APIError
+// (ErrMeterLimitExceeded), not a ValidationCode, so it is never part of
+// this ordered check sequence.
 //
 // HEARTBEAT_NOT_STARTED, HEARTBEAT_DEAD and TOO_MANY_USERS moved from ⛔
 // to ✅ with the API patch: the fingerprint scope emits the two heartbeat
@@ -59,9 +63,6 @@ const (
 	ValidationCodeTooMuchDisk ValidationCode = "TOO_MUCH_DISK"
 	// ValidationCodeTooManyProcesses process count over policy.max_processes. ✅ reachable.
 	ValidationCodeTooManyProcesses ValidationCode = "TOO_MANY_PROCESSES"
-	// ValidationCodeTooManyUses uses >= max_uses, strict regardless of
-	// overage strategy (overage strategies never apply to uses). ✅ reachable.
-	ValidationCodeTooManyUses ValidationCode = "TOO_MANY_USES"
 
 	// ValidationCodeNotFound modeled for schema completeness only — the
 	// handler returns HTTP 404 directly instead of emitting this code in

@@ -34,9 +34,12 @@ const (
 
 // OverageStrategy controls how far over policy.max_* a machine/core/
 // memory/disk/process count is still permitted before validation fails
-// with the corresponding TOO_MANY_*/TOO_MUCH_* ValidationCode. It never
-// applies to `uses`, which the server always compares with strict `>=`
-// regardless of strategy.
+// with the corresponding TOO_MANY_*/TOO_MUCH_* ValidationCode. It has no
+// bearing on entitlement meters either: a kind: "meter" entitlement's
+// max_value is enforced by IncrementEntitlementUsage/
+// DecrementEntitlementUsage with a strict `>` comparison
+// (current_value + increment > max_value), never adjusted by this
+// strategy.
 type OverageStrategy string
 
 const (
@@ -243,7 +246,6 @@ type PolicyAttributes struct {
 	MaxUsers                         *int32                 `json:"max_users"`
 	Duration                         *int64                 `json:"duration"`
 	MaxProcesses                     *int32                 `json:"max_processes"`
-	MaxUses                          *int32                 `json:"max_uses"`
 	Scheme                           *string                `json:"scheme"`
 	MaxCores                         *int32                 `json:"max_cores"`
 	MaxMachines                      *int32                 `json:"max_machines"`
